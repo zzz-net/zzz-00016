@@ -112,6 +112,12 @@ function initDb() {
       PRAGMA foreign_keys = ON;
     `);
   }
+
+  const appCols = d.prepare("PRAGMA table_info(applications)").all();
+  if (!appCols.find(c => c.name === 'cancel_remark')) {
+    d.exec(`ALTER TABLE applications ADD COLUMN cancel_remark TEXT`);
+  }
+
   return d;
 }
 

@@ -115,7 +115,7 @@ function checkTransition(fromStatus, toStatus) {
   }
 }
 
-function updateStatus(db, applicationId, operator, toStatus, action, comment, rejectReason = null) {
+function updateStatus(db, applicationId, operator, toStatus, action, comment, { rejectReason = null, cancelRemark = null } = {}) {
   const app = db.prepare('SELECT * FROM applications WHERE id = ?').get(applicationId);
   if (!app) {
     throw new AppError(`申请 ${applicationId} 不存在`, 'NOT_FOUND', 404);
@@ -125,24 +125,44 @@ function updateStatus(db, applicationId, operator, toStatus, action, comment, re
 
   db.prepare(`
     UPDATE applications
-    SET status = ?, updated_at = datetime('now','localtime'), reject_reason = ?
+    SET status = ?, updated_at = datetime('now','localtime'), reject_reason = ?, cancel_remark = ?
     WHERE id = ?
-  `).run(toStatus, rejectReason, applicationId);
+  `).run(toStatus, rejectReason, cancelRemark, applicationId);
 
   logApproval(db, applicationId, operator.id, action, comment, fromStatus, toStatus);
   return getApplicationById(applicationId);
 }
 
+function cancelApplication(applicationId, operator, { comment } = {}) {
+  const db = getDb();
+  const app = db.prepare('SELECT * FROM applications WHERE id = ?').get(applicationId);
+  if (!app) {
+    throw new AppError(`申请 ${applicationId} 不存在`, 'NOT_FOUND', 404);
+  }
+  const isOwner = app.applicant_id === operator.id;
+  const isAdmin = operator.role === 'admin';
+  if (!isOwner && !isAdmin) {
+    throw new AppError(
+      `无权取消该申请，仅申请人本人或管理员可取消`,
+      'PERMISSION_DENIED',
+      403,
+      { applicant_id: app.applicant_id, operator_id: operator.id, operator_role: operator.role }
+    );
+  }
+  const remark = comment || (isAdmin ? '管理员代取消' : '申请人取消');
+  return updateStatus(db, applicationId, operator, STATUS.CANCELLED, 'CANCEL', remark, { cancelRemark: remark });
+}
+
 function dispatchReview(applicationId, operator, { approved, comment } = {}) {
   if (!approved) {
-    return updateStatus(getDb(), applicationId, operator, STATUS.REJECTED, 'DISPATCH_REJECT', comment || '调度驳回', comment || '调度驳回');
+    return updateStatus(getDb(), applicationId, operator, STATUS.REJECTED, 'DISPATCH_REJECT', comment || '调度驳回', { rejectReason: comment || '调度驳回' });
   }
   return updateStatus(getDb(), applicationId, operator, STATUS.DISPATCH_REVIEWED, 'DISPATCH_APPROVE', comment || '调度复核通过');
 }
 
 function safetyApprove(applicationId, operator, { approved, comment } = {}) {
   if (!approved) {
-    return updateStatus(getDb(), applicationId, operator, STATUS.REJECTED, 'SAFETY_REJECT', comment || '安全驳回', comment || '安全驳回');
+    return updateStatus(getDb(), applicationId, operator, STATUS.REJECTED, 'SAFETY_REJECT', comment || '安全驳回', { rejectReason: comment || '安全驳回' });
   }
   return updateStatus(getDb(), applicationId, operator, STATUS.SAFETY_APPROVED, 'SAFETY_APPROVE', comment || '安全审批通过');
 }
@@ -330,6 +350,7 @@ function serializeApplication(app, db) {
     status: app.status,
     status_label: STATUS_LABEL[app.status] || app.status,
     reject_reason: app.reject_reason,
+    cancel_remark: app.cancel_remark,
     applicant: applicant ? { id: applicant.id, name: applicant.name, username: applicant.username, role: applicant.role } : null,
     history,
     created_at: app.created_at,
@@ -399,7 +420,7 @@ function toCSV(items) {
   const headers = [
     'ID', '线路', '原站点', '新站点', '移除站点', '新增站点',
     '生效开始', '生效结束', '车辆', '原因', '状态', '状态描述',
-    '驳回原因', '申请人', '创建时间', '更新时间'
+    '驳回原因', '取消备注', '申请人', '创建时间', '更新时间'
   ];
   const escape = (val) => {
     if (val === null || val === undefined) return '';
@@ -421,6 +442,7 @@ function toCSV(items) {
       it.vehicle_id || '', it.reason,
       it.status, it.status_label,
       it.reject_reason || '',
+      it.cancel_remark || '',
       it.applicant ? it.applicant.name : '',
       it.created_at, it.updated_at
     ].map(escape).join(','));
@@ -431,6 +453,7 @@ function toCSV(items) {
 module.exports = {
   STATUS, STATUS_LABEL, VALID_TRANSITIONS,
   createApplication,
+  cancelApplication,
   dispatchReview,
   safetyApprove,
   publish,

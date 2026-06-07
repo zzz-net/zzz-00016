@@ -34,6 +34,7 @@ app.get('/', (_req, res) => {
         dispatch_review: 'POST /api/applications/:id/dispatch-review',
         safety_approve: 'POST /api/applications/:id/safety-approve',
         publish: 'POST /api/applications/:id/publish',
+        cancel: 'POST /api/applications/:id/cancel',
         export: 'GET /api/applications/export?format=json|csv&route_name=&start_date=&end_date='
       }
     }

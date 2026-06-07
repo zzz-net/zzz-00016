@@ -132,4 +132,21 @@ router.post(
   }
 );
 
+router.post(
+  '/:id/cancel',
+  auth,
+  audit('APPLICATION_CANCEL', (r) => parseInt(r.params.id, 10)),
+  (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (isNaN(id)) {
+        return next(new (require('../utils/response').AppError)('id 必须是数字', 'VALIDATION_ERROR', 400));
+      }
+      const { comment } = req.body || {};
+      const app = svc.cancelApplication(id, req.user, { comment });
+      success(res, app, '取消成功');
+    } catch (err) { next(err); }
+  }
+);
+
 module.exports = router;
