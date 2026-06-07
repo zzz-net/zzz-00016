@@ -77,19 +77,41 @@ function initDb() {
     CREATE TABLE IF NOT EXISTS conflicts (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       application_id INTEGER NOT NULL,
-      conflict_type TEXT NOT NULL CHECK(conflict_type IN ('TIME','VEHICLE','BOTH')),
+      conflict_type TEXT NOT NULL CHECK(conflict_type IN ('TIME','VEHICLE','BOTH','STOP')),
       conflict_detail TEXT NOT NULL,
       conflicting_application_id INTEGER,
       created_at TEXT DEFAULT (datetime('now','localtime')),
       FOREIGN KEY (application_id) REFERENCES applications(id)
     );
 
+    CREATE INDEX IF NOT EXISTS idx_conflicts_app ON conflicts(application_id);
     CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
     CREATE INDEX IF NOT EXISTS idx_applications_route ON applications(route_name);
     CREATE INDEX IF NOT EXISTS idx_applications_time ON applications(effective_start, effective_end);
     CREATE INDEX IF NOT EXISTS idx_approval_logs_app ON approval_logs(application_id);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id);
   `);
+
+  const migrationRow = d.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='conflicts'").get();
+  if (migrationRow && migrationRow.sql && !migrationRow.sql.includes("'STOP'")) {
+    d.exec(`
+      PRAGMA foreign_keys = OFF;
+      CREATE TABLE IF NOT EXISTS conflicts_new (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        application_id INTEGER NOT NULL,
+        conflict_type TEXT NOT NULL CHECK(conflict_type IN ('TIME','VEHICLE','BOTH','STOP')),
+        conflict_detail TEXT NOT NULL,
+        conflicting_application_id INTEGER,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        FOREIGN KEY (application_id) REFERENCES applications(id)
+      );
+      INSERT INTO conflicts_new (id, application_id, conflict_type, conflict_detail, conflicting_application_id, created_at)
+      SELECT id, application_id, conflict_type, conflict_detail, conflicting_application_id, created_at FROM conflicts;
+      DROP TABLE conflicts;
+      ALTER TABLE conflicts_new RENAME TO conflicts;
+      PRAGMA foreign_keys = ON;
+    `);
+  }
   return d;
 }
 

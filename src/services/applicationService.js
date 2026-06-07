@@ -208,6 +208,50 @@ function detectConflicts(db, app) {
       }
     }
   }
+
+  const timeOverlapRows = db.prepare(`
+    SELECT * FROM applications
+    WHERE status = 'PUBLISHED'
+      AND id != ?
+      AND (
+        (effective_start <= ? AND effective_end > ?)
+        OR (effective_start < ? AND effective_end >= ?)
+        OR (effective_start >= ? AND effective_end <= ?)
+      )
+  `).all(
+    app.id,
+    app.effective_end, app.effective_start,
+    app.effective_end, app.effective_start,
+    app.effective_start, app.effective_end
+  );
+
+  const currentStops = new Set([
+    ...JSON.parse(app.original_stops || '[]'),
+    ...JSON.parse(app.new_stops || '[]')
+  ]);
+
+  for (const other of timeOverlapRows) {
+    if (conflicts.find(c => c.conflicting_application_id === other.id)) continue;
+    const otherStops = new Set([
+      ...JSON.parse(other.original_stops || '[]'),
+      ...JSON.parse(other.new_stops || '[]')
+    ]);
+    const common = [];
+    for (const s of currentStops) {
+      if (otherStops.has(s)) common.push(s);
+    }
+    if (common.length === 0) continue;
+    conflicts.push({
+      type: 'STOP',
+      details: [
+        `时间重叠: ${other.effective_start} ~ ${other.effective_end} 与本申请 ${app.effective_start} ~ ${app.effective_end} 重叠`,
+        `站点冲突: 共同站点 ${JSON.stringify(common)}`
+      ],
+      conflicting_application_id: other.id,
+      conflicting_route_name: other.route_name
+    });
+  }
+
   return conflicts;
 }
 
