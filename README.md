@@ -832,3 +832,151 @@ curl -s -X POST http://localhost:3000/api/risk-rules/import \
 - `RISK_RULE_CREATED / RISK_RULE_UPDATED / RISK_RULE_DELETED / RISK_RULE_STATUS_CHANGED
 - `RISK_RULE_VIOLATED_SUBMIT / RISK_RULE_VIOLATED_CLONE / RISK_RULE_VIOLATED_PUBLISH
 - `RISK_RULE_EXPORT_RESULT / RISK_RULE_IMPORTED
+
+## 改线公告通知模块
+
+对已发布（`PUBLISHED`）的改线申请，管理员（admin）可手动生成**版本化、可追踪**的公告记录。公告落 SQLite，服务重启后仍可查询。
+
+### 权限矩阵
+
+| 操作 | admin | dispatcher / safety | teacher |
+|------|-------|---------------------|---------|
+| 生成公告 | ✅ | ❌ | ❌ |
+| 查看全部公告 | ✅ | ✅ | ❌（仅见本人申请相关） |
+| 查看单条公告详情 | ✅ | ✅ | ❌（非本人相关返回 403） |
+| 按申请查看公告列表 | ✅ | ✅ | ❌（非本人申请返回 403） |
+| 导出公告（JSON/CSV） | ✅ | ✅ | ❌（仅导出本人相关） |
+
+**响应脱敏规则**：普通老师视角的公告响应中，不暴露 `created_by` 的用户 id（仅显示姓名），不暴露 `applicant_id`、内部筛选条件或其他老师信息。
+
+### API 总览
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `POST` | `/api/announcements` | admin 生成公告 |
+| `GET` | `/api/announcements` | 公告列表（按角色隔离） |
+| `GET` | `/api/announcements/:id` | 公告详情 |
+| `GET` | `/api/announcements/application/:applicationId` | 按申请查公告版本列表 |
+| `GET` | `/api/announcements/export` | 导出 JSON/CSV（按角色隔离，写 audit_logs） |
+
+### 1. 生成公告（admin）
+
+`POST /api/announcements`
+
+请求体：
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|------|------|
+| `application_id` | integer | 是 | 已发布的改线申请 ID |
+| `version` | integer | 否 | 公告版本号（>=1）。缺省时自动取该申请的下一版本 |
+| `remark` | string | 否 | 公告备注/补充说明 |
+
+**前置条件**：申请状态必须为 `PUBLISHED`（已发布）。
+
+**唯一约束**：`(application_id, version)` 联合唯一。重复生成返回 `ANNOUNCEMENT_DUPLICATE`（HTTP 409），并在 `details.existing` 中携带现有公告摘要。
+
+### 2. 公告列表
+
+`GET /api/announcements?route_name=&start_date=&end_date=&page=1&page_size=20`
+
+- admin/dispatcher/safety：返回全部公告
+- teacher：仅返回本人提交申请相关的公告
+- 筛选参数：`route_name`（线路模糊）、`start_date`（生效结束 >=）、`end_date`（生效开始 <=）
+
+### 3. 公告详情
+
+`GET /api/announcements/:id`
+
+### 4. 按申请查公告版本
+
+`GET /api/announcements/application/:applicationId`
+
+按版本升序返回该申请的所有公告记录。
+
+### 5. 导出公告
+
+`GET /api/announcements/export?format=json|csv&route_name=&start_date=&end_date=`
+
+- 权限隔离同列表接口
+- 每次导出写入 `audit_logs`（`action=ANNOUNCEMENT_EXPORT_RESULT`，含操作者、格式、筛选条件、导出条数）
+- CSV：11 列（ID、申请ID、版本、线路、移除站点、新增站点、影响站点数、生效开始、生效结束、备注、发布时间），UTF-8 BOM
+- JSON：返回 `{ count, items, filters, filter_summary }`
+
+### 最短可跑示例（改线公告全流程）
+
+```bash
+# 0. 启动服务
+npm install
+npm run init-db
+npm start
+
+# 1. 张老师（id=1）提交改线申请
+APP_ID=$(curl -s -X POST http://localhost:3000/api/applications \
+  -H "Content-Type: application/json" -H "X-User-Id: 1" \
+  -d '{
+    "route_name": "1号线",
+    "original_stops": ["东门站","少年宫站","图书馆站","学校站"],
+    "new_stops": ["东门站","人民广场站","体育馆站","学校站"],
+    "effective_start": "2026-06-10T07:00:00.000Z",
+    "effective_end": "2026-06-10T09:00:00.000Z",
+    "vehicle_id": "BUS-A01",
+    "reason": "少年宫路段道路施工，临时绕行"
+  }' | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])")
+echo "申请ID=$APP_ID"
+
+# 2. 王调度（id=3）复核通过
+curl -s -X POST http://localhost:3000/api/applications/$APP_ID/dispatch-review \
+  -H "Content-Type: application/json" -H "X-User-Id: 3" \
+  -d '{"approved":true}' | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['code'], d['data']['status_label'])"
+
+# 3. 赵安全员（id=4）审批通过
+curl -s -X POST http://localhost:3000/api/applications/$APP_ID/safety-approve \
+  -H "Content-Type: application/json" -H "X-User-Id: 4" \
+  -d '{"approved":true}' | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['code'], d['data']['status_label'])"
+
+# 4. 陈主任（id=5）发布
+curl -s -X POST http://localhost:3000/api/applications/$APP_ID/publish \
+  -H "X-User-Id: 5" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['code'], d['data']['status_label'])"
+
+# 5. 陈主任生成 v1 公告
+ANN_ID=$(curl -s -X POST http://localhost:3000/api/announcements \
+  -H "Content-Type: application/json" -H "X-User-Id: 5" \
+  -d "{\"application_id\":$APP_ID,\"remark\":\"请各位老师和家长注意改线安排\"}" \
+  | python3 -c "import sys,json; print(json.load(sys.stdin)['data']['id'])")
+echo "公告ID=$ANN_ID"
+
+# 6. 重复生成 v1 公告（应返回 ANNOUNCEMENT_DUPLICATE + 现有摘要）
+curl -s -X POST http://localhost:3000/api/announcements \
+  -H "Content-Type: application/json" -H "X-User-Id: 5" \
+  -d "{\"application_id\":$APP_ID,\"version\":1}" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print('code=', d['code']); print('existing=', d['details']['existing'] if d.get('details') else None)"
+
+# 7. 李老师（id=2，非申请人）越权查看该公告（应 403）
+curl -s http://localhost:3000/api/announcements/$ANN_ID -H "X-User-Id: 2" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['code'], d['message'])"
+
+# 8. 张老师（id=1，申请人）正常查看本人公告
+curl -s http://localhost:3000/api/announcements/$ANN_ID -H "X-User-Id: 1" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['code'], '线路=', d['data']['route_name'], '影响站点=', d['data']['affected_stops'])"
+
+# 9. 王调度（id=3）查看全部公告（特权视角，含 created_by）
+curl -s "http://localhost:3000/api/announcements?page_size=5" -H "X-User-Id: 3" \
+  | python3 -c "import sys,json; d=json.load(sys.stdin); print('total=', d['data']['total'], 'items[0].keys=', list(d['data']['items'][0].keys()) if d['data']['items'] else [])"
+
+# 10. 导出 CSV（张老师仅导出本人）
+curl -s "http://localhost:3000/api/announcements/export?format=csv" -H "X-User-Id: 1" | head -3
+```
+
+### 核心数据表
+
+- `announcements`：公告记录（`id`、`application_id`、`version`、`route_name`、`affected_stops`(JSON)、`effective_start`、`effective_end`、`remark`、`created_by`、`created_at`），`UNIQUE(application_id, version)`
+- `audit_logs`：公告相关审计事件 `ANNOUNCEMENT_CREATE`、`ANNOUNCEMENT_LIST`、`ANNOUNCEMENT_GET`、`ANNOUNCEMENT_EXPORT`、`ANNOUNCEMENT_EXPORT_RESULT`、`ANNOUNCEMENT_CREATED`
+
+### 稳定错误码
+
+| 错误码 | HTTP | 场景 |
+|--------|------|------|
+| `VALIDATION_ERROR` | 400 | 参数缺失或非法 |
+| `NOT_FOUND` | 404 | 申请或公告不存在 |
+| `PERMISSION_DENIED` | 403 | teacher 越权查看/查看他人公告 / 非 admin 生成公告 |
+| `INVALID_STATUS` | 409 | 申请未发布（非 `PUBLISHED`）时生成公告 |
+| `ANNOUNCEMENT_DUPLICATE` | 409 | 同一申请 + 版本重复生成公告，`details.existing` 携带现有公告摘要 |
