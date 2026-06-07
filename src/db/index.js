@@ -45,9 +45,11 @@ function initDb() {
         'PUBLISHED','REJECTED','CANCELLED'
       )),
       reject_reason TEXT,
+      source_application_id INTEGER,
       created_at TEXT DEFAULT (datetime('now','localtime')),
       updated_at TEXT DEFAULT (datetime('now','localtime')),
-      FOREIGN KEY (applicant_id) REFERENCES users(id)
+      FOREIGN KEY (applicant_id) REFERENCES users(id),
+      FOREIGN KEY (source_application_id) REFERENCES applications(id)
     );
 
     CREATE TABLE IF NOT EXISTS approval_logs (
@@ -90,6 +92,7 @@ function initDb() {
     CREATE INDEX IF NOT EXISTS idx_applications_time ON applications(effective_start, effective_end);
     CREATE INDEX IF NOT EXISTS idx_approval_logs_app ON approval_logs(application_id);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id);
+    CREATE INDEX IF NOT EXISTS idx_applications_source ON applications(source_application_id);
   `);
 
   const migrationRow = d.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='conflicts'").get();
@@ -116,6 +119,14 @@ function initDb() {
   const appCols = d.prepare("PRAGMA table_info(applications)").all();
   if (!appCols.find(c => c.name === 'cancel_remark')) {
     d.exec(`ALTER TABLE applications ADD COLUMN cancel_remark TEXT`);
+  }
+  if (!appCols.find(c => c.name === 'source_application_id')) {
+    d.exec(`ALTER TABLE applications ADD COLUMN source_application_id INTEGER REFERENCES applications(id)`);
+  }
+
+  const sourceIdx = d.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_applications_source'").get();
+  if (!sourceIdx) {
+    d.exec(`CREATE INDEX IF NOT EXISTS idx_applications_source ON applications(source_application_id)`);
   }
 
   return d;

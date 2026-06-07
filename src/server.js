@@ -36,6 +36,7 @@ app.get('/', (_req, res) => {
         safety_approve: 'POST /api/applications/:id/safety-approve',
         publish: 'POST /api/applications/:id/publish',
         cancel: 'POST /api/applications/:id/cancel',
+        clone_resubmit: 'POST /api/applications/:id/clone',
         export: 'GET /api/applications/export?format=json|csv&route_name=&start_date=&end_date='
       }
     }

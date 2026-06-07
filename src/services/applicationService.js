@@ -153,6 +153,73 @@ function cancelApplication(applicationId, operator, { comment } = {}) {
   return updateStatus(db, applicationId, operator, STATUS.CANCELLED, 'CANCEL', remark, { cancelRemark: remark });
 }
 
+function cloneApplication(applicationId, operator, { applicant_id } = {}) {
+  const db = getDb();
+  const src = db.prepare('SELECT * FROM applications WHERE id = ?').get(applicationId);
+  if (!src) {
+    throw new AppError(`申请 ${applicationId} 不存在`, 'NOT_FOUND', 404);
+  }
+
+  const isAdmin = operator.role === 'admin';
+  const isOwner = src.applicant_id === operator.id;
+
+  if (!isAdmin && !isOwner) {
+    throw new AppError(
+      `无权复制该申请，仅申请人本人或管理员可复制`,
+      'PERMISSION_DENIED',
+      403,
+      { source_applicant_id: src.applicant_id, operator_id: operator.id, operator_role: operator.role }
+    );
+  }
+
+  if (!TERMINAL_STATUSES_FOR_CLONE.includes(src.status)) {
+    throw new AppError(
+      `仅已驳回或已取消的申请可复制，当前状态 ${src.status} 不允许复制`,
+      'INVALID_TRANSITION',
+      409,
+      { current_status: src.status, allowed_statuses: TERMINAL_STATUSES_FOR_CLONE }
+    );
+  }
+
+  let targetApplicantId = src.applicant_id;
+  if (isAdmin && applicant_id !== undefined && applicant_id !== null) {
+    const tid = parseInt(applicant_id, 10);
+    if (isNaN(tid)) {
+      throw new AppError('applicant_id 必须为数字', 'VALIDATION_ERROR', 400);
+    }
+    const targetUser = db.prepare('SELECT id FROM users WHERE id = ?').get(tid);
+    if (!targetUser) {
+      throw new AppError(`指定的申请人 ${tid} 不存在`, 'VALIDATION_ERROR', 400);
+    }
+    targetApplicantId = tid;
+  }
+
+  const info = db.prepare(`
+    INSERT INTO applications
+      (applicant_id, route_name, original_stops, new_stops, effective_start, effective_end, vehicle_id, reason, status, source_application_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    targetApplicantId,
+    src.route_name,
+    src.original_stops,
+    src.new_stops,
+    src.effective_start,
+    src.effective_end,
+    src.vehicle_id,
+    src.reason,
+    STATUS.PENDING_SUBMITTED,
+    src.id
+  );
+
+  const newId = info.lastInsertRowid;
+  const comment = isAdmin && targetApplicantId !== src.applicant_id
+    ? `管理员代复制，源自申请 #${src.id}`
+    : `复制自申请 #${src.id}`;
+  logApproval(db, newId, operator.id, 'CLONE_RESUBMIT', comment, null, STATUS.PENDING_SUBMITTED);
+
+  return getApplicationById(newId);
+}
+
 function dispatchReview(applicationId, operator, { approved, comment } = {}) {
   if (!approved) {
     return updateStatus(getDb(), applicationId, operator, STATUS.REJECTED, 'DISPATCH_REJECT', comment || '调度驳回', { rejectReason: comment || '调度驳回' });
@@ -337,6 +404,32 @@ function serializeApplication(app, db) {
     }
   }));
 
+  let source_application = null;
+  if (app.source_application_id) {
+    const src = db.prepare(`
+      SELECT a.id, a.route_name, a.status, a.created_at,
+             u.id as applicant_id, u.name as applicant_name, u.username as applicant_username, u.role as applicant_role
+      FROM applications a
+      LEFT JOIN users u ON u.id = a.applicant_id
+      WHERE a.id = ?
+    `).get(app.source_application_id);
+    if (src) {
+      source_application = {
+        id: src.id,
+        route_name: src.route_name,
+        status: src.status,
+        status_label: STATUS_LABEL[src.status] || src.status,
+        created_at: src.created_at,
+        applicant: {
+          id: src.applicant_id,
+          name: src.applicant_name,
+          username: src.applicant_username,
+          role: src.applicant_role
+        }
+      };
+    }
+  }
+
   return {
     id: app.id,
     route_name: app.route_name,
@@ -351,6 +444,8 @@ function serializeApplication(app, db) {
     status_label: STATUS_LABEL[app.status] || app.status,
     reject_reason: app.reject_reason,
     cancel_remark: app.cancel_remark,
+    source_application_id: app.source_application_id || null,
+    source_application,
     applicant: applicant ? { id: applicant.id, name: applicant.name, username: applicant.username, role: applicant.role } : null,
     history,
     created_at: app.created_at,
@@ -491,7 +586,8 @@ function toCSV(items) {
   const headers = [
     'ID', '线路', '原站点', '新站点', '移除站点', '新增站点',
     '生效开始', '生效结束', '车辆', '原因', '状态', '状态描述',
-    '驳回原因', '取消备注', '申请人', '创建时间', '更新时间'
+    '驳回原因', '取消备注', '申请人', '来源申请ID', '来源申请人',
+    '创建时间', '更新时间'
   ];
   const escape = (val) => {
     if (val === null || val === undefined) return '';
@@ -515,6 +611,8 @@ function toCSV(items) {
       it.reject_reason || '',
       it.cancel_remark || '',
       it.applicant ? it.applicant.name : '',
+      it.source_application_id || '',
+      it.source_application && it.source_application.applicant ? it.source_application.applicant.name : '',
       it.created_at, it.updated_at
     ].map(escape).join(','));
   }
@@ -544,6 +642,7 @@ const NEXT_ROLE_LABEL = {
 };
 
 const NON_TERMINAL_STATUSES = ['PENDING_SUBMITTED', 'DISPATCH_REVIEWED', 'SAFETY_APPROVED'];
+const TERMINAL_STATUSES_FOR_CLONE = ['REJECTED', 'CANCELLED'];
 
 function getReminders(user, { timeout_status, route_name, status } = {}) {
   const db = getDb();
@@ -644,6 +743,7 @@ module.exports = {
   DEFAULT_TIMEOUT_MINUTES,
   getTimeoutMinutes,
   createApplication,
+  cloneApplication,
   cancelApplication,
   dispatchReview,
   safetyApprove,

@@ -205,4 +205,21 @@ router.post(
   }
 );
 
+router.post(
+  '/:id/clone',
+  auth,
+  audit('APPLICATION_CLONE_RESUBMIT', (r) => parseInt(r.params.id, 10)),
+  (req, res, next) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (isNaN(id)) {
+        return next(new (require('../utils/response').AppError)('id 必须是数字', 'VALIDATION_ERROR', 400));
+      }
+      const { applicant_id } = req.body || {};
+      const app = svc.cloneApplication(id, req.user, { applicant_id });
+      success(res, app, '复制再提交成功');
+    } catch (err) { next(err); }
+  }
+);
+
 module.exports = router;
