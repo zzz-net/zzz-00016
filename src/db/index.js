@@ -1,0 +1,96 @@
+const Database = require('better-sqlite3');
+const path = require('path');
+
+const DB_PATH = path.join(__dirname, '..', '..', 'data', 'school-bus.db');
+
+let db;
+
+function getDb() {
+  if (!db) {
+    const fs = require('fs');
+    const dbDir = path.dirname(DB_PATH);
+    if (!fs.existsSync(dbDir)) {
+      fs.mkdirSync(dbDir, { recursive: true });
+    }
+    db = new Database(DB_PATH);
+    db.pragma('journal_mode = WAL');
+    db.pragma('foreign_keys = ON');
+  }
+  return db;
+}
+
+function initDb() {
+  const d = getDb();
+  d.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      username TEXT UNIQUE NOT NULL,
+      name TEXT NOT NULL,
+      role TEXT NOT NULL CHECK(role IN ('teacher','dispatcher','safety','admin')),
+      created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS applications (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      applicant_id INTEGER NOT NULL,
+      route_name TEXT NOT NULL,
+      original_stops TEXT NOT NULL,
+      new_stops TEXT NOT NULL,
+      effective_start TEXT NOT NULL,
+      effective_end TEXT NOT NULL,
+      vehicle_id TEXT,
+      reason TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'PENDING_SUBMITTED' CHECK(status IN (
+        'PENDING_SUBMITTED','DISPATCH_REVIEWED','SAFETY_APPROVED',
+        'PUBLISHED','REJECTED','CANCELLED'
+      )),
+      reject_reason TEXT,
+      created_at TEXT DEFAULT (datetime('now','localtime')),
+      updated_at TEXT DEFAULT (datetime('now','localtime')),
+      FOREIGN KEY (applicant_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS approval_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      application_id INTEGER NOT NULL,
+      operator_id INTEGER NOT NULL,
+      action TEXT NOT NULL,
+      comment TEXT,
+      from_status TEXT,
+      to_status TEXT,
+      created_at TEXT DEFAULT (datetime('now','localtime')),
+      FOREIGN KEY (application_id) REFERENCES applications(id),
+      FOREIGN KEY (operator_id) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS audit_logs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      user_id INTEGER,
+      action TEXT NOT NULL,
+      resource TEXT,
+      resource_id INTEGER,
+      detail TEXT,
+      ip TEXT,
+      created_at TEXT DEFAULT (datetime('now','localtime'))
+    );
+
+    CREATE TABLE IF NOT EXISTS conflicts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      application_id INTEGER NOT NULL,
+      conflict_type TEXT NOT NULL CHECK(conflict_type IN ('TIME','VEHICLE','BOTH')),
+      conflict_detail TEXT NOT NULL,
+      conflicting_application_id INTEGER,
+      created_at TEXT DEFAULT (datetime('now','localtime')),
+      FOREIGN KEY (application_id) REFERENCES applications(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
+    CREATE INDEX IF NOT EXISTS idx_applications_route ON applications(route_name);
+    CREATE INDEX IF NOT EXISTS idx_applications_time ON applications(effective_start, effective_end);
+    CREATE INDEX IF NOT EXISTS idx_approval_logs_app ON approval_logs(application_id);
+    CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id);
+  `);
+  return d;
+}
+
+module.exports = { getDb, initDb, DB_PATH };

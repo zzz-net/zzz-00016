@@ -1,0 +1,325 @@
+# 校车临时改线审批 JSON API
+
+本地可运行的校车临时改线审批系统，基于 Node.js + Express + SQLite。
+
+## 功能特性
+
+- 完整审批流程：申请人提交 → 调度复核 → 安全审批 → 发布改线
+- 状态机流转校验，非法流转直接拒绝
+- 权限控制：普通老师不能审批，调度/安全/管理员各有分工
+- 冲突检测：时间段冲突、车辆冲突检测，冲突时拒绝发布
+- 幂等保护：重复发布不会改坏数据
+- 统一错误响应结构，稳定可预测
+- SQLite 持久化：申请、角色、冲突记录、审计日志全落盘
+- 查询接口展示：当前状态、影响站点（移除/新增）、操作人、完整历史
+- 导出：按日期或线路筛选导出 JSON / CSV，内容与查询一致
+
+## 目录结构
+
+```
+.
+├── data/                    # SQLite 数据库文件（自动生成）
+├── src/
+│   ├── db/index.js          # 数据库连接与 schema 初始化
+│   ├── middleware/
+│   │   ├── auth.js          # 认证与角色权限
+│   │   └── audit.js         # 审计日志
+│   ├── routes/
+│   │   ├── applications.js  # 改线申请相关路由
+│   │   └── users.js         # 用户查询路由
+│   ├── scripts/init-db.js   # 初始化数据脚本
+│   ├── services/
+│   │   └── applicationService.js  # 核心业务逻辑
+│   ├── utils/response.js    # 统一响应与错误类
+│   └── server.js            # 服务入口
+├── package.json
+└── README.md
+```
+
+## 快速开始
+
+### 1. 安装依赖
+
+```bash
+npm install
+```
+
+### 2. 初始化数据库（首次运行）
+
+```bash
+npm run init-db
+```
+
+初始化后创建 5 个用户（请求头 `X-User-Id` 传 id）：
+
+| id | username       | 姓名     | 角色         | 权限                                 |
+|----|----------------|----------|--------------|--------------------------------------|
+| 1  | teacher_zhang  | 张老师   | teacher      | 提交申请                             |
+| 2  | teacher_li     | 李老师   | teacher      | 提交申请                             |
+| 3  | dispatcher_wang| 王调度   | dispatcher   | 调度复核（通过/驳回）                |
+| 4  | safety_zhao    | 赵安全员 | safety       | 安全审批（通过/驳回）                |
+| 5  | admin_chen     | 陈主任   | admin        | 可执行任意操作、发布改线             |
+
+如需重置数据，删除 `data/school-bus.db` 后重新执行 `npm run init-db`。
+
+### 3. 启动服务
+
+```bash
+npm start
+```
+
+默认监听 `http://localhost:3000`，可通过环境变量 `PORT` 修改。
+
+健康检查：`GET http://localhost:3000/health`
+
+## API 总览
+
+所有接口（除 `/health`、`/` 外）都需要请求头 `X-User-Id`（数字用户 id）。
+
+### 统一响应结构
+
+成功：
+```json
+{
+  "success": true,
+  "code": "OK",
+  "message": "ok",
+  "data": { ... },
+  "timestamp": "2026-06-07T08:00:00.000Z"
+}
+```
+
+失败：
+```json
+{
+  "success": false,
+  "code": "VALIDATION_ERROR",
+  "message": "参数校验失败",
+  "details": ["route_name 必填且为非空字符串"],
+  "timestamp": "2026-06-07T08:00:00.000Z"
+}
+```
+
+常见错误码：`AUTH_REQUIRED`、`PERMISSION_DENIED`、`VALIDATION_ERROR`、`NOT_FOUND`、`INVALID_TRANSITION`、`PUBLISH_CONFLICT`、`INTERNAL_ERROR`。
+
+### 状态流转
+
+```
+PENDING_SUBMITTED (待调度复核)
+       │
+       ├─ 调度通过 → DISPATCH_REVIEWED (待安全审批)
+       │                  │
+       │                  ├─ 安全通过 → SAFETY_APPROVED (待发布)
+       │                  │                  │
+       │                  │                  └─ 发布 → PUBLISHED (已发布)
+       │                  └─ 安全驳回 → REJECTED
+       ├─ 调度驳回 → REJECTED
+       └─ 取消 → CANCELLED
+```
+
+终态（`REJECTED`、`CANCELLED`、`PUBLISHED`）不可再流转。
+
+## 接口详情与 curl 示例
+
+### 1. 提交改线申请
+
+`POST /api/applications`
+
+请求体：
+| 字段             | 类型     | 必填 | 说明                     |
+|------------------|----------|------|--------------------------|
+| route_name       | string   | 是   | 线路名称                 |
+| original_stops   | string[] | 是   | 原站点列表               |
+| new_stops        | string[] | 是   | 新站点列表               |
+| effective_start  | string   | 是   | 生效开始 ISO 时间        |
+| effective_end    | string   | 是   | 生效结束 ISO 时间        |
+| vehicle_id       | string   | 否   | 车辆标识（用于冲突检测） |
+| reason           | string   | 是   | 改线原因                 |
+
+```bash
+curl -s -X POST http://localhost:3000/api/applications \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 1" \
+  -d '{
+    "route_name": "1号线",
+    "original_stops": ["东门站","少年宫站","图书馆站","学校站"],
+    "new_stops": ["东门站","人民广场站","体育馆站","学校站"],
+    "effective_start": "2026-06-10T07:00:00.000Z",
+    "effective_end": "2026-06-10T09:00:00.000Z",
+    "vehicle_id": "BUS-A01",
+    "reason": "少年宫路段道路施工，临时绕行"
+  }' | jq
+```
+
+### 2. 查询申请列表
+
+`GET /api/applications?status=&route_name=&start_date=&end_date=&page=1&page_size=20`
+
+```bash
+# 查询全部
+curl -s http://localhost:3000/api/applications -H "X-User-Id: 1" | jq
+
+# 按状态筛选
+curl -s "http://localhost:3000/api/applications?status=PENDING_SUBMITTED" -H "X-User-Id: 1" | jq
+
+# 按线路 + 日期筛选
+curl -s "http://localhost:3000/api/applications?route_name=1号线&start_date=2026-06-01&end_date=2026-06-30" \
+  -H "X-User-Id: 1" | jq
+```
+
+### 3. 查询申请详情（含完整历史、影响站点、操作人）
+
+`GET /api/applications/:id`
+
+```bash
+curl -s http://localhost:3000/api/applications/1 -H "X-User-Id: 1" | jq
+```
+
+响应中关键字段：
+- `status` / `status_label`：当前状态
+- `affected_stops.removed`：被移除的站点
+- `affected_stops.added`：新增的站点
+- `applicant`：申请人信息
+- `history[]`：完整操作历史，每条含 `action`、`operator`（操作人）、`from_status`、`to_status`、`comment`
+
+### 4. 调度复核
+
+`POST /api/applications/:id/dispatch-review`
+
+权限：`dispatcher` 或 `admin`
+
+请求体：`{ "approved": true|false, "comment": "..." }`
+
+```bash
+# 通过
+curl -s -X POST http://localhost:3000/api/applications/1/dispatch-review \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 3" \
+  -d '{"approved":true,"comment":"站点变更合理，同意复核"}' | jq
+
+# 驳回
+curl -s -X POST http://localhost:3000/api/applications/1/dispatch-review \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 3" \
+  -d '{"approved":false,"comment":"绕行方案未覆盖早高峰，请补充说明"}' | jq
+```
+
+### 5. 安全审批
+
+`POST /api/applications/:id/safety-approve`
+
+权限：`safety` 或 `admin`
+
+```bash
+curl -s -X POST http://localhost:3000/api/applications/1/safety-approve \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 4" \
+  -d '{"approved":true,"comment":"新线路安全，无风险点"}' | jq
+```
+
+### 6. 发布改线
+
+`POST /api/applications/:id/publish`
+
+权限：`admin`
+
+- 必须先通过调度复核和安全审批（状态为 `SAFETY_APPROVED`）
+- 自动检测时间段冲突和车辆冲突，冲突则拒绝并给出详情
+- 重复发布幂等，不会改坏数据
+
+```bash
+curl -s -X POST http://localhost:3000/api/applications/1/publish \
+  -H "X-User-Id: 5" | jq
+```
+
+### 7. 导出数据
+
+`GET /api/applications/export?format=json|csv&route_name=&start_date=&end_date=`
+
+筛选条件与列表查询一致，导出内容结构与查询结果一致。
+
+```bash
+# 导出 JSON
+curl -s -o applications.json "http://localhost:3000/api/applications/export?format=json&route_name=1号线" \
+  -H "X-User-Id: 1"
+
+# 导出 CSV（Excel 可直接打开，含 BOM）
+curl -s -o applications.csv "http://localhost:3000/api/applications/export?format=csv&start_date=2026-06-01&end_date=2026-06-30" \
+  -H "X-User-Id: 1"
+```
+
+### 8. 用户相关
+
+```bash
+# 当前登录用户
+curl -s http://localhost:3000/api/users/me -H "X-User-Id: 3" | jq
+
+# 用户列表
+curl -s http://localhost:3000/api/users -H "X-User-Id: 1" | jq
+```
+
+## 失败路径演示（复现场景）
+
+### A. 普通老师尝试审批（权限不足）
+
+```bash
+curl -s -X POST http://localhost:3000/api/applications/1/dispatch-review \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 1" \
+  -d '{"approved":true}' | jq
+```
+
+返回：
+```json
+{
+  "success": false,
+  "code": "PERMISSION_DENIED",
+  "message": "权限不足，需要角色: dispatcher/admin，当前角色: teacher",
+  "details": { "allowedRoles": ["dispatcher","admin"], "currentRole": "teacher" }
+}
+```
+
+### B. 缺少前置审批，直接发布
+
+创建一个新申请后直接 `publish`：
+
+```bash
+# 新建（状态 PENDING_SUBMITTED），记住返回的 id
+curl -s -X POST http://localhost:3000/api/applications \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 2" \
+  -d '{
+    "route_name":"2号线",
+    "original_stops":["A","B","C"],
+    "new_stops":["A","D","C"],
+    "effective_start":"2026-07-01T07:00:00.000Z",
+    "effective_end":"2026-07-01T09:00:00.000Z",
+    "vehicle_id":"BUS-A02",
+    "reason":"B站积水"
+  }'
+
+# 直接发布（id=2）
+curl -s -X POST http://localhost:3000/api/applications/2/publish -H "X-User-Id: 5" | jq
+```
+
+返回 `INVALID_TRANSITION`，提示当前状态必须为 `SAFETY_APPROVED`，数据保持不变。
+
+### C. 时间段/车辆冲突，无法发布
+
+先发布一个正常的 1 号线 BUS-A01 改线（上面 1-6 步骤全部走完），然后创建另一个时间重叠且车辆相同的申请并走完审批，发布时返回 `PUBLISH_CONFLICT` 及冲突详情。
+
+### D. 重复发布幂等
+
+对已发布的申请再次执行 publish，返回同一份数据，不报错，数据库无新写入。
+
+## 数据存储
+
+SQLite 文件位于 `data/school-bus.db`，核心表：
+
+- `users`：用户与角色
+- `applications`：改线申请（含状态、JSON 化站点、时间段、车辆等）
+- `approval_logs`：审批流水，操作人、动作、前后状态、备注、时间
+- `audit_logs`：全量接口审计日志
+- `conflicts`：发布冲突记录
+
+重启服务状态、历史均不丢失。
