@@ -374,18 +374,49 @@ E3. 申请不存在（HTTP 404）：
 
 ### 8. 导出数据
 
-`GET /api/applications/export?format=json|csv&route_name=&start_date=&end_date=`
+`GET /api/applications/export?format=json|csv&status=&route_name=&start_date=&end_date=&applicant_id=&has_cancel_remark=`
 
-筛选条件与列表查询一致，导出内容结构与查询结果一致。
+**权限规则**：
+- `admin` / `dispatcher` / `safety`：可按任意条件筛选，包括 `applicant_id` 指定他人
+- `teacher`（普通老师）：默认只能导出本人提交的申请；传 `applicant_id=自己id` 允许，传别人的 id 返回 `PERMISSION_DENIED`
+
+**筛选参数**：
+
+| 参数               | 类型    | 说明                                                           |
+|--------------------|---------|----------------------------------------------------------------|
+| `format`           | string  | `json`（默认）或 `csv`                                         |
+| `status`           | string  | 按状态筛选，如 `PENDING_SUBMITTED`、`CANCELLED` 等             |
+| `route_name`       | string  | 按线路名称模糊匹配                                             |
+| `start_date`       | string  | 生效结束日期 >= 该日期（ISO 日期 YYYY-MM-DD）                  |
+| `end_date`         | string  | 生效开始日期 <= 该日期（ISO 日期 YYYY-MM-DD）                  |
+| `applicant_id`     | integer | 按申请人 id 筛选（仅 admin/dispatcher/safety 可跨人）          |
+| `has_cancel_remark`| boolean | `true`/`1`/`yes` 仅导出有取消备注的；`false`/`0`/`no` 则相反   |
+
+**响应说明**：
+- JSON：返回 `{ count, items, filters, filter_summary }`，`filters` 记录实际使用的筛选条件，`filter_summary` 是便于归档的文字摘要
+- CSV：17 列顺序稳定不变（ID、线路、原站点、新站点、移除站点、新增站点、生效开始、生效结束、车辆、原因、状态、状态描述、驳回原因、取消备注、申请人、创建时间、更新时间），带 UTF-8 BOM，Excel 可直接打开
+- 每次导出都会写入 `audit_logs`（`action=APPLICATION_EXPORT_RESULT`），包含操作者、格式、筛选条件、导出条数
 
 ```bash
-# 导出 JSON
-curl -s -o applications.json "http://localhost:3000/api/applications/export?format=json&route_name=1号线" \
-  -H "X-User-Id: 1"
+# admin 按状态 + 取消备注筛选导出 JSON
+curl -s "http://localhost:3000/api/applications/export?format=json&status=CANCELLED&has_cancel_remark=true" \
+  -H "X-User-Id: 5" | jq
 
-# 导出 CSV（Excel 可直接打开，含 BOM）
-curl -s -o applications.csv "http://localhost:3000/api/applications/export?format=csv&start_date=2026-06-01&end_date=2026-06-30" \
-  -H "X-User-Id: 1"
+# 调度员按申请人导出（李老师 id=2）
+curl -s "http://localhost:3000/api/applications/export?format=json&applicant_id=2" \
+  -H "X-User-Id: 3" | jq
+
+# 普通老师默认导出（只能看到自己的）
+curl -s "http://localhost:3000/api/applications/export?format=json" \
+  -H "X-User-Id: 1" | jq
+
+# 普通老师越权尝试筛别人（返回 403 PERMISSION_DENIED）
+curl -s "http://localhost:3000/api/applications/export?format=json&applicant_id=2" \
+  -H "X-User-Id: 1" | jq
+
+# 导出 CSV（Excel 可直接打开，含 BOM），多条件组合
+curl -s -o applications.csv "http://localhost:3000/api/applications/export?format=csv&route_name=1号线&start_date=2026-06-01&end_date=2026-06-30" \
+  -H "X-User-Id: 5"
 ```
 
 ### 9. 用户相关

@@ -296,7 +296,7 @@ async function waitForHealth() {
   // =====================================================
   section('场景 12：JSON 导出包含 CANCELLED 状态、文案、取消备注');
 
-  const jsonR = await request('GET', '/api/applications/export?format=json', null, { 'X-User-Id': '1' });
+  const jsonR = await request('GET', '/api/applications/export?format=json', null, { 'X-User-Id': '5' });
   assert('JSON 导出返回 200', jsonR.status === 200);
   const jsonCancelled = jsonR.body.items.filter(it => it.status === 'CANCELLED');
   assert('JSON 导出含 CANCELLED 条目', jsonCancelled.length >= 5);
@@ -337,7 +337,7 @@ async function waitForHealth() {
   const listAfterRestart = await request('GET', '/api/applications?status=CANCELLED&page_size=100', null, { 'X-User-Id': '1' });
   assert('重启后列表仍有 CANCELLED 条目', listAfterRestart.body && listAfterRestart.body.data && listAfterRestart.body.data.items.length >= 5);
 
-  const jsonAfterRestart = await request('GET', '/api/applications/export?format=json', null, { 'X-User-Id': '1' });
+  const jsonAfterRestart = await request('GET', '/api/applications/export?format=json', null, { 'X-User-Id': '5' });
   assert('重启后 JSON 导出仍有 CANCELLED', jsonAfterRestart.body && jsonAfterRestart.body.items.filter(it => it.status === 'CANCELLED').length >= 5);
 
   const csvAfterRestart = await request('GET', '/api/applications/export?format=csv', null, { 'X-User-Id': '1' });

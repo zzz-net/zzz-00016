@@ -399,21 +399,92 @@ function listApplications({ status, route_name, start_date, end_date, page = 1, 
   };
 }
 
-function exportApplications({ format = 'json', route_name, start_date, end_date } = {}) {
+function exportApplications({ format = 'json', route_name, start_date, end_date, status, applicant_id, has_cancel_remark, user } = {}) {
   const db = getDb();
   const conditions = [];
   const params = [];
-  if (route_name) { conditions.push('route_name LIKE ?'); params.push(`%${route_name}%`); }
-  if (start_date) { conditions.push('effective_end >= ?'); params.push(new Date(start_date).toISOString()); }
-  if (end_date) { conditions.push('effective_start <= ?'); params.push(new Date(end_date).toISOString()); }
+  const filters = {};
+
+  const isPrivileged = user && (user.role === 'admin' || user.role === 'dispatcher' || user.role === 'safety');
+
+  if (status) {
+    conditions.push('status = ?');
+    params.push(status);
+    filters.status = status;
+  }
+  if (route_name) {
+    conditions.push('route_name LIKE ?');
+    params.push(`%${route_name}%`);
+    filters.route_name = route_name;
+  }
+  if (start_date) {
+    conditions.push('effective_end >= ?');
+    params.push(new Date(start_date).toISOString());
+    filters.start_date = start_date;
+  }
+  if (end_date) {
+    conditions.push('effective_start <= ?');
+    params.push(new Date(end_date).toISOString());
+    filters.end_date = end_date;
+  }
+
+  if (has_cancel_remark !== undefined && has_cancel_remark !== null && has_cancel_remark !== '') {
+    const val = String(has_cancel_remark).toLowerCase();
+    if (val === 'true' || val === '1' || val === 'yes') {
+      conditions.push('cancel_remark IS NOT NULL AND cancel_remark != ?');
+      params.push('');
+      filters.has_cancel_remark = true;
+    } else if (val === 'false' || val === '0' || val === 'no') {
+      conditions.push('(cancel_remark IS NULL OR cancel_remark = ?)');
+      params.push('');
+      filters.has_cancel_remark = false;
+    }
+  }
+
+  if (applicant_id !== undefined && applicant_id !== null && applicant_id !== '') {
+    const targetId = parseInt(applicant_id, 10);
+    if (isNaN(targetId)) {
+      throw new AppError('applicant_id 必须为数字', 'VALIDATION_ERROR', 400);
+    }
+    if (!isPrivileged && user && targetId !== user.id) {
+      throw new AppError(
+        '无权导出其他申请人的申请，仅调度、安全员或管理员可按申请人筛选',
+        'PERMISSION_DENIED',
+        403,
+        { operator_id: user ? user.id : null, operator_role: user ? user.role : null, requested_applicant_id: targetId }
+      );
+    }
+    conditions.push('applicant_id = ?');
+    params.push(targetId);
+    filters.applicant_id = targetId;
+  } else if (!isPrivileged && user) {
+    conditions.push('applicant_id = ?');
+    params.push(user.id);
+    filters.applicant_id = user.id;
+    filters.scope_note = '普通老师默认仅导出本人申请';
+  }
+
   const where = conditions.length > 0 ? 'WHERE ' + conditions.join(' AND ') : '';
   const rows = db.prepare(`SELECT * FROM applications ${where} ORDER BY id ASC`).all(...params);
   const items = rows.map(r => serializeApplication(r, db));
 
   if (format === 'csv') {
-    return toCSV(items);
+    return { csv: toCSV(items), count: items.length, filters };
   }
-  return { count: items.length, items };
+  return { count: items.length, items, filters, filter_summary: buildFilterSummary(filters, user) };
+}
+
+function buildFilterSummary(filters, user) {
+  const parts = [];
+  if (filters.status) parts.push(`状态=${filters.status}`);
+  if (filters.route_name) parts.push(`线路含"${filters.route_name}"`);
+  if (filters.start_date) parts.push(`生效结束>=${filters.start_date}`);
+  if (filters.end_date) parts.push(`生效开始<=${filters.end_date}`);
+  if (filters.has_cancel_remark === true) parts.push('有取消备注');
+  if (filters.has_cancel_remark === false) parts.push('无取消备注');
+  if (filters.applicant_id !== undefined) parts.push(`申请人ID=${filters.applicant_id}`);
+  if (user) parts.push(`操作人=${user.name}(id=${user.id},role=${user.role})`);
+  return parts.join('; ') || '无筛选条件';
 }
 
 function toCSV(items) {

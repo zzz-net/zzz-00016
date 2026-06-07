@@ -1,6 +1,6 @@
 const express = require('express');
 const { auth, requireRole } = require('../middleware/auth');
-const { audit } = require('../middleware/audit');
+const { audit, log } = require('../middleware/audit');
 const { success } = require('../utils/response');
 const svc = require('../services/applicationService');
 
@@ -45,14 +45,44 @@ router.get(
   audit('APPLICATION_EXPORT'),
   (req, res, next) => {
     try {
-      const { format = 'json', route_name, start_date, end_date } = req.query;
+      const { format = 'json', route_name, start_date, end_date, status, applicant_id, has_cancel_remark } = req.query;
+      const opts = {
+        format,
+        route_name,
+        start_date,
+        end_date,
+        status,
+        applicant_id,
+        has_cancel_remark,
+        user: req.user
+      };
       if (format === 'csv') {
-        const csv = svc.exportApplications({ format: 'csv', route_name, start_date, end_date });
+        const result = svc.exportApplications(opts);
+        log('APPLICATION_EXPORT_RESULT', {
+          user: req.user,
+          resource: req.baseUrl + req.path,
+          detail: {
+            format: 'csv',
+            filters: result.filters,
+            count: result.count
+          },
+          ip: req.ip
+        });
         res.setHeader('Content-Type', 'text/csv; charset=utf-8');
         res.setHeader('Content-Disposition', `attachment; filename="applications_${Date.now()}.csv"`);
-        return res.send('\uFEFF' + csv);
+        return res.send('\uFEFF' + result.csv);
       }
-      const data = svc.exportApplications({ format: 'json', route_name, start_date, end_date });
+      const data = svc.exportApplications({ ...opts, format: 'json' });
+      log('APPLICATION_EXPORT_RESULT', {
+        user: req.user,
+        resource: req.baseUrl + req.path,
+        detail: {
+          format: 'json',
+          filters: data.filters,
+          count: data.count
+        },
+        ip: req.ip
+      });
       res.setHeader('Content-Type', 'application/json; charset=utf-8');
       res.setHeader('Content-Disposition', `attachment; filename="applications_${Date.now()}.json"`);
       return res.json(data);
