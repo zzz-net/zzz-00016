@@ -52,7 +52,7 @@ router.get(
         detail: {
           operator_id: req.user.id,
           operator_role: req.user.role,
-          filters: { timeout_status, route_name, status },
+          filters: result.filters,
           hit_count: result.total,
           timeout_minutes: result.timeout_minutes,
           overdue_count: result.overdue_count,

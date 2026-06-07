@@ -321,7 +321,7 @@ function getLatestAuditLog(action) {
     rAdminStatusEmpty.body.data.filters.role_scope === 'admin: 待发布');
 
   // =====================================================
-  section('场景 3d：admin 审计日志 —— hit_count 与 role_scope 正确落盘');
+  section('场景 3d：admin 审计日志 —— role_scope 与响应值一致，hit_count 和超时统计正确');
 
   const auditAdminBefore = countAuditLogsByAction('APPLICATION_REMINDERS_QUERY');
   const rAdminForAudit = await request('GET', '/api/applications/reminders', null, { 'X-User-Id': '5' });
@@ -340,9 +340,94 @@ function getLatestAuditLog(action) {
       'audit_hit=' + latestAdminAudit.detail.hit_count +
       ', response_total=' + (rAdminForAudit.body && rAdminForAudit.body.data ? rAdminForAudit.body.data.total : 'N/A'));
     assert('admin 审计 detail.filters 存在', typeof latestAdminAudit.detail.filters === 'object');
+    assert('admin 审计 detail.filters.role_scope == 响应 data.filters.role_scope',
+      latestAdminAudit.detail.filters && latestAdminAudit.detail.filters.role_scope ===
+      (rAdminForAudit.body && rAdminForAudit.body.data && rAdminForAudit.body.data.filters && rAdminForAudit.body.data.filters.role_scope),
+      'audit_role_scope=' + (latestAdminAudit.detail.filters && latestAdminAudit.detail.filters.role_scope) +
+      ', response_role_scope=' + (rAdminForAudit.body && rAdminForAudit.body.data && rAdminForAudit.body.data.filters && rAdminForAudit.body.data.filters.role_scope));
+    assert('admin 审计 detail.filters.timeout_minutes 存在且为数字',
+      latestAdminAudit.detail.filters && typeof latestAdminAudit.detail.filters.timeout_minutes === 'number');
     assert('admin 审计 detail.timeout_minutes=60', latestAdminAudit.detail.timeout_minutes === 60);
     assert('admin 审计 detail.overdue_count 为数字', typeof latestAdminAudit.detail.overdue_count === 'number');
     assert('admin 审计 detail.warning_count 为数字', typeof latestAdminAudit.detail.warning_count === 'number');
+    assert('admin 审计 detail.overdue_count 与响应一致',
+      latestAdminAudit.detail.overdue_count === (rAdminForAudit.body && rAdminForAudit.body.data ? rAdminForAudit.body.data.overdue_count : -1));
+    assert('admin 审计 detail.warning_count 与响应一致',
+      latestAdminAudit.detail.warning_count === (rAdminForAudit.body && rAdminForAudit.body.data ? rAdminForAudit.body.data.warning_count : -1));
+  }
+
+  // =====================================================
+  section('场景 3e：审计 filters 完整性 —— 筛选/空结果/其他角色均不丢失 role_scope');
+
+  // 3e-1: admin + route_name 筛选 → filters 同时含 role_scope + route_name
+  const auditBefRoute = countAuditLogsByAction('APPLICATION_REMINDERS_QUERY');
+  const rAdminRouteAudit = await request(
+    'GET', '/api/applications/reminders?route_name=提醒测试线-C',
+    null, { 'X-User-Id': '5' }
+  );
+  const auditAfterRoute = countAuditLogsByAction('APPLICATION_REMINDERS_QUERY');
+  assert('admin+路由筛选 审计增加 1 条', auditAfterRoute === auditBefRoute + 1);
+  const auditRoute = getLatestAuditLog('APPLICATION_REMINDERS_QUERY');
+  if (auditRoute && auditRoute.detail) {
+    assert('admin+路由筛选 审计 filters.role_scope=' + (rAdminRouteAudit.body && rAdminRouteAudit.body.data && rAdminRouteAudit.body.data.filters.role_scope),
+      auditRoute.detail.filters && auditRoute.detail.filters.role_scope ===
+      (rAdminRouteAudit.body && rAdminRouteAudit.body.data && rAdminRouteAudit.body.data.filters.role_scope));
+    assert('admin+路由筛选 审计 filters.route_name == 响应值',
+      auditRoute.detail.filters && auditRoute.detail.filters.route_name ===
+      (rAdminRouteAudit.body && rAdminRouteAudit.body.data && rAdminRouteAudit.body.data.filters.route_name),
+      'audit_route=' + (auditRoute.detail.filters && auditRoute.detail.filters.route_name) +
+      ', response_route=' + (rAdminRouteAudit.body && rAdminRouteAudit.body.data && rAdminRouteAudit.body.data.filters.route_name));
+    assert('admin+路由筛选 审计 filters 同时含 role_scope 和 route_name',
+      auditRoute.detail.filters && 'role_scope' in auditRoute.detail.filters && 'route_name' in auditRoute.detail.filters);
+  }
+
+  // 3e-2: admin + status 筛选为空结果 → 空结果也不丢 role_scope
+  const auditBefEmpty = countAuditLogsByAction('APPLICATION_REMINDERS_QUERY');
+  const rAdminEmpty = await request(
+    'GET', '/api/applications/reminders?status=PENDING_SUBMITTED',
+    null, { 'X-User-Id': '5' }
+  );
+  const auditAfterEmpty = countAuditLogsByAction('APPLICATION_REMINDERS_QUERY');
+  assert('admin+空结果 审计增加 1 条', auditAfterEmpty === auditBefEmpty + 1);
+  const auditEmpty = getLatestAuditLog('APPLICATION_REMINDERS_QUERY');
+  if (auditEmpty && auditEmpty.detail) {
+    assert('空结果 hit_count=0', auditEmpty.detail.hit_count === 0);
+    assert('空结果 filters.role_scope 仍为 admin: 待发布',
+      auditEmpty.detail.filters && auditEmpty.detail.filters.role_scope === 'admin: 待发布',
+      '实际=' + (auditEmpty.detail.filters && auditEmpty.detail.filters.role_scope));
+    assert('空结果 filters.status 仍记录',
+      auditEmpty.detail.filters && auditEmpty.detail.filters.status === 'PENDING_SUBMITTED');
+    assert('空结果 overdue_count=0', auditEmpty.detail.overdue_count === 0);
+    assert('空结果 warning_count=0', auditEmpty.detail.warning_count === 0);
+  }
+
+  // 3e-3: 调度员查询 → 审计也带 role_scope
+  const rDispatchAudit = await request('GET', '/api/applications/reminders', null, { 'X-User-Id': '3' });
+  const auditDispatch = getLatestAuditLog('APPLICATION_REMINDERS_QUERY');
+  if (auditDispatch && auditDispatch.detail) {
+    assert('调度员审计 filters.role_scope = dispatcher: 待调度复核',
+      auditDispatch.detail.filters && auditDispatch.detail.filters.role_scope === 'dispatcher: 待调度复核',
+      '实际=' + (auditDispatch.detail.filters && auditDispatch.detail.filters.role_scope));
+    assert('调度员审计 hit_count 与响应一致',
+      auditDispatch.detail.hit_count === (rDispatchAudit.body && rDispatchAudit.body.data ? rDispatchAudit.body.data.total : -1));
+  }
+
+  // 3e-4: 安全员查询 → 审计也带 role_scope
+  const rSafetyAudit = await request('GET', '/api/applications/reminders', null, { 'X-User-Id': '4' });
+  const auditSafety = getLatestAuditLog('APPLICATION_REMINDERS_QUERY');
+  if (auditSafety && auditSafety.detail) {
+    assert('安全员审计 filters.role_scope = safety: 待安全审批',
+      auditSafety.detail.filters && auditSafety.detail.filters.role_scope === 'safety: 待安全审批',
+      '实际=' + (auditSafety.detail.filters && auditSafety.detail.filters.role_scope));
+  }
+
+  // 3e-5: 老师查询 → 审计也带 role_scope
+  const rTeacherAudit = await request('GET', '/api/applications/reminders', null, { 'X-User-Id': '1' });
+  const auditTeacher = getLatestAuditLog('APPLICATION_REMINDERS_QUERY');
+  if (auditTeacher && auditTeacher.detail) {
+    assert('老师审计 filters.role_scope = teacher: 本人未结束的申请',
+      auditTeacher.detail.filters && auditTeacher.detail.filters.role_scope === 'teacher: 本人未结束的申请',
+      '实际=' + (auditTeacher.detail.filters && auditTeacher.detail.filters.role_scope));
   }
 
   // =====================================================
