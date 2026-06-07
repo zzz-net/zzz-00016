@@ -40,6 +40,32 @@ router.get(
 );
 
 router.get(
+  '/reminders',
+  auth,
+  (req, res, next) => {
+    try {
+      const { timeout_status, route_name, status } = req.query;
+      const result = svc.getReminders(req.user, { timeout_status, route_name, status });
+      log('APPLICATION_REMINDERS_QUERY', {
+        user: req.user,
+        resource: req.baseUrl + req.path,
+        detail: {
+          operator_id: req.user.id,
+          operator_role: req.user.role,
+          filters: { timeout_status, route_name, status },
+          hit_count: result.total,
+          timeout_minutes: result.timeout_minutes,
+          overdue_count: result.overdue_count,
+          warning_count: result.warning_count
+        },
+        ip: req.ip
+      });
+      success(res, result);
+    } catch (err) { next(err); }
+  }
+);
+
+router.get(
   '/export',
   auth,
   audit('APPLICATION_EXPORT'),

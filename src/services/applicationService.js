@@ -521,8 +521,128 @@ function toCSV(items) {
   return lines.join('\r\n') + '\r\n';
 }
 
+const DEFAULT_TIMEOUT_MINUTES = 60;
+
+function getTimeoutMinutes() {
+  const raw = process.env.APPROVAL_TIMEOUT_MINUTES;
+  if (raw === undefined || raw === null || raw === '') return DEFAULT_TIMEOUT_MINUTES;
+  const n = parseInt(raw, 10);
+  if (isNaN(n) || n <= 0) return DEFAULT_TIMEOUT_MINUTES;
+  return n;
+}
+
+const NEXT_ROLE_FOR_STATUS = {
+  PENDING_SUBMITTED: 'dispatcher',
+  DISPATCH_REVIEWED: 'safety',
+  SAFETY_APPROVED: 'admin'
+};
+
+const NEXT_ROLE_LABEL = {
+  dispatcher: '调度复核',
+  safety: '安全审批',
+  admin: '发布'
+};
+
+const NON_TERMINAL_STATUSES = ['PENDING_SUBMITTED', 'DISPATCH_REVIEWED', 'SAFETY_APPROVED'];
+
+function getReminders(user, { timeout_status, route_name, status } = {}) {
+  const db = getDb();
+  const timeoutMinutes = getTimeoutMinutes();
+  const isPrivileged = user.role === 'admin' || user.role === 'dispatcher' || user.role === 'safety';
+
+  const conditions = [];
+  const params = [];
+  const appliedFilters = { timeout_minutes: timeoutMinutes };
+
+  if (isPrivileged) {
+    if (user.role === 'dispatcher') {
+      conditions.push('status = ?');
+      params.push('PENDING_SUBMITTED');
+      appliedFilters.role_scope = 'dispatcher: 待调度复核';
+    } else if (user.role === 'safety') {
+      conditions.push('status = ?');
+      params.push('DISPATCH_REVIEWED');
+      appliedFilters.role_scope = 'safety: 待安全审批';
+    } else if (user.role === 'admin') {
+      conditions.push('status IN (?, ?, ?)');
+      params.push('PENDING_SUBMITTED', 'DISPATCH_REVIEWED', 'SAFETY_APPROVED');
+      appliedFilters.role_scope = 'admin: 全部待处理';
+    }
+  } else {
+    conditions.push('applicant_id = ?');
+    params.push(user.id);
+    conditions.push('status IN (?, ?, ?)');
+    params.push('PENDING_SUBMITTED', 'DISPATCH_REVIEWED', 'SAFETY_APPROVED');
+    appliedFilters.role_scope = 'teacher: 本人未结束的申请';
+  }
+
+  if (status) {
+    conditions.push('status = ?');
+    params.push(status);
+    appliedFilters.status = status;
+  }
+
+  if (route_name) {
+    conditions.push('route_name LIKE ?');
+    params.push(`%${route_name}%`);
+    appliedFilters.route_name = route_name;
+  }
+
+  const where = 'WHERE ' + conditions.join(' AND ');
+  const rows = db.prepare(`SELECT * FROM applications ${where} ORDER BY updated_at ASC`).all(...params);
+
+  const now = Date.now();
+  const items = [];
+  for (const r of rows) {
+    const updatedAt = new Date(r.updated_at).getTime();
+    const elapsedMs = now - updatedAt;
+    const elapsedMinutes = elapsedMs / 60000;
+    const minutesToTimeout = timeoutMinutes - elapsedMinutes;
+    const isOverdue = minutesToTimeout <= 0;
+    const isWarning = !isOverdue && minutesToTimeout <= timeoutMinutes;
+
+    if (timeout_status === 'overdue' && !isOverdue) continue;
+    if (timeout_status === 'pending' && isOverdue) continue;
+
+    const nextRole = NEXT_ROLE_FOR_STATUS[r.status] || null;
+    items.push({
+      id: r.id,
+      route_name: r.route_name,
+      effective_start: r.effective_start,
+      effective_end: r.effective_end,
+      vehicle_id: r.vehicle_id,
+      reason: r.reason,
+      status: r.status,
+      status_label: STATUS_LABEL[r.status] || r.status,
+      applicant_id: r.applicant_id,
+      next_role: nextRole,
+      next_role_label: nextRole ? NEXT_ROLE_LABEL[nextRole] : null,
+      last_updated_at: r.updated_at,
+      minutes_to_timeout: Math.round(minutesToTimeout * 100) / 100,
+      is_overdue: isOverdue,
+      is_warning: isWarning
+    });
+  }
+
+  if (timeout_status) appliedFilters.timeout_status = timeout_status;
+
+  const overdueCount = items.filter(i => i.is_overdue).length;
+  const warningCount = items.filter(i => !i.is_overdue && i.is_warning).length;
+
+  return {
+    timeout_minutes: timeoutMinutes,
+    total: items.length,
+    overdue_count: overdueCount,
+    warning_count: warningCount,
+    filters: appliedFilters,
+    items
+  };
+}
+
 module.exports = {
   STATUS, STATUS_LABEL, VALID_TRANSITIONS,
+  DEFAULT_TIMEOUT_MINUTES,
+  getTimeoutMinutes,
   createApplication,
   cancelApplication,
   dispatchReview,
@@ -531,6 +651,7 @@ module.exports = {
   getApplicationById,
   listApplications,
   exportApplications,
+  getReminders,
   detectConflicts,
   parseDate
 };

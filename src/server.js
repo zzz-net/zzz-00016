@@ -30,6 +30,7 @@ app.get('/', (_req, res) => {
       applications: {
         create: 'POST /api/applications',
         list: 'GET /api/applications?status=&route_name=&start_date=&end_date=&page=&page_size=',
+        reminders: 'GET /api/applications/reminders?timeout_status=all|pending|overdue&route_name=&status=',
         get: 'GET /api/applications/:id',
         dispatch_review: 'POST /api/applications/:id/dispatch-review',
         safety_approve: 'POST /api/applications/:id/safety-approve',
