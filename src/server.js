@@ -4,6 +4,7 @@ const { errorHandler, notFoundHandler, success } = require('./utils/response');
 const applicationsRouter = require('./routes/applications');
 const usersRouter = require('./routes/users');
 const riskRulesRouter = require('./routes/riskRules');
+const announcementsRouter = require('./routes/announcements');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -51,6 +52,13 @@ app.get('/', (_req, res) => {
         hits_by_rule: 'GET /api/risk-rules/:id/hits?page=&page_size=',
         export: 'GET /api/risk-rules/export?format=json|csv&rule_type=&status=',
         import: 'POST /api/risk-rules/import (admin)'
+      },
+      announcements: {
+        create: 'POST /api/announcements (admin)',
+        list: 'GET /api/announcements?route_name=&start_date=&end_date=&page=&page_size=',
+        get: 'GET /api/announcements/:id',
+        list_by_application: 'GET /api/announcements/application/:applicationId',
+        export: 'GET /api/announcements/export?format=json|csv&route_name=&start_date=&end_date='
       }
     }
   });
@@ -59,6 +67,7 @@ app.get('/', (_req, res) => {
 app.use('/api/users', usersRouter);
 app.use('/api/applications', applicationsRouter);
 app.use('/api/risk-rules', riskRulesRouter);
+app.use('/api/announcements', announcementsRouter);
 
 app.use(notFoundHandler);
 app.use(errorHandler);

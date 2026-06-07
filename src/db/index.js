@@ -113,6 +113,22 @@ function initDb() {
       FOREIGN KEY (created_by) REFERENCES users(id)
     );
 
+    CREATE TABLE IF NOT EXISTS announcements (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      application_id INTEGER NOT NULL,
+      version INTEGER NOT NULL DEFAULT 1,
+      route_name TEXT NOT NULL,
+      affected_stops TEXT NOT NULL,
+      effective_start TEXT NOT NULL,
+      effective_end TEXT NOT NULL,
+      remark TEXT,
+      created_by INTEGER NOT NULL,
+      created_at TEXT DEFAULT (datetime('now','localtime')),
+      UNIQUE(application_id, version),
+      FOREIGN KEY (application_id) REFERENCES applications(id),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_conflicts_app ON conflicts(application_id);
     CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
     CREATE INDEX IF NOT EXISTS idx_applications_route ON applications(route_name);
@@ -124,6 +140,9 @@ function initDb() {
     CREATE INDEX IF NOT EXISTS idx_risk_rules_type ON risk_rules(rule_type);
     CREATE INDEX IF NOT EXISTS idx_risk_rule_hits_rule ON risk_rule_hits(rule_id);
     CREATE INDEX IF NOT EXISTS idx_risk_rule_hits_app ON risk_rule_hits(application_id);
+    CREATE INDEX IF NOT EXISTS idx_announcements_app ON announcements(application_id);
+    CREATE INDEX IF NOT EXISTS idx_announcements_route ON announcements(route_name);
+    CREATE INDEX IF NOT EXISTS idx_announcements_created ON announcements(created_at);
   `);
 
   const migrationRow = d.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='conflicts'").get();
@@ -207,6 +226,30 @@ function initDb() {
   }
   if (!riskCols.find(c => c.name === 'last_hit_at')) {
     d.exec(`ALTER TABLE risk_rules ADD COLUMN last_hit_at TEXT`);
+  }
+
+  const announcementsTable = d.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='announcements'").get();
+  if (!announcementsTable) {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS announcements (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        application_id INTEGER NOT NULL,
+        version INTEGER NOT NULL DEFAULT 1,
+        route_name TEXT NOT NULL,
+        affected_stops TEXT NOT NULL,
+        effective_start TEXT NOT NULL,
+        effective_end TEXT NOT NULL,
+        remark TEXT,
+        created_by INTEGER NOT NULL,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        UNIQUE(application_id, version),
+        FOREIGN KEY (application_id) REFERENCES applications(id),
+        FOREIGN KEY (created_by) REFERENCES users(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_announcements_app ON announcements(application_id);
+      CREATE INDEX IF NOT EXISTS idx_announcements_route ON announcements(route_name);
+      CREATE INDEX IF NOT EXISTS idx_announcements_created ON announcements(created_at);
+    `);
   }
 
   return d;
