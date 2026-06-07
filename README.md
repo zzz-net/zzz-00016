@@ -608,14 +608,225 @@ curl -s -X POST http://localhost:3000/api/applications/99999/cancel \
 
 返回 `NOT_FOUND`（HTTP 404）。
 
+### H. 越权复制申请（非申请人非 admin）
+
+李老师（id=2）试图复制张老师（id=1）的已驳回申请：
+
+```bash
+# 先确保源申请 id=1 是已驳回/已取消状态
+curl -s -X POST http://localhost:3000/api/applications/1/clone \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 2" | jq
+```
+
+返回 `PERMISSION_DENIED`（HTTP 403），不会创建新申请。
+
+### I. 未终态不允许复制
+
+申请处于 PENDING_SUBMITTED 等未结束状态时复制：
+
+```bash
+# 假设 id=100 当前状态为 PENDING_SUBMITTED
+curl -s -X POST http://localhost:3000/api/applications/100/clone \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 1" | jq
+```
+
+返回 `INVALID_TRANSITION`（HTTP 409），`details.allowed_statuses` 为 `["REJECTED", "CANCELLED"]`。
+
+### J. 复制不存在的申请
+
+```bash
+curl -s -X POST http://localhost:3000/api/applications/99999/clone \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 1" | jq
+```
+
+返回 `NOT_FOUND`（HTTP 404）。
+
 ## 数据存储
 
 SQLite 文件位于 `data/school-bus.db`，核心表：
 
 - `users`：用户与角色
-- `applications`：改线申请（含状态、JSON 化站点、时间段、车辆等）
-- `approval_logs`：审批流水，操作人、动作、前后状态、备注、时间
-- `audit_logs`：全量接口审计日志
+- `applications`：改线申请（含状态、JSON 化站点、时间段、车辆、`source_application_id` 来源关联等）
+- `approval_logs`：审批流水，操作人、动作（含 `CLONE_RESUBMIT`）、前后状态、备注、时间
+- `audit_logs`：全量接口审计日志（含 `APPLICATION_CLONE_RESUBMIT`、`RISK_RULE_CREATED/UPDATED/DELETED/STATUS_CHANGED/VIOLATED_*`）
 - `conflicts`：发布冲突记录
+- `risk_rules`：风险规则（类型、配置、状态、命中次数）
+- `risk_rule_hits`：风险规则命中明细
 
-重启服务状态、历史均不丢失。
+重启服务状态、历史、来源关联、规则均不丢失。
+
+## 风险规则校验模块
+
+管理员（admin）可以维护风险规则，在提交（`POST /api/applications`、复制再提交（`POST /api/applications/:id/clone`）、发布（`POST /api/applications/:id/publish`）三个环节自动拦截不合规申请，命中后返回稳定错误码 `RISK_RULE_VIOLATION`（HTTP 409）及命中详情，且不写入错误审批流。
+
+### 规则类型
+
+| 类型 | 说明 | rule_config 结构 |
+|------|------|-----------------|
+| `BANNED_STOP` | 禁用站点，出现在原站点或新站点则拦截 | `{ stops: ["站点名数组` |
+| `BANNED_TIME_WINDOW` | 禁行时间段（UTC），生效开始/结束落入该窗口则拦截 | `{ start_hour, start_minute, end_hour, end_minute }`（整数，小时 0-23，分钟 0-59；`
+| `VEHICLE_RESTRICTION` | 车辆限制（DENY 黑名单 / ALLOW 白名单 | `{ vehicles: ["BUS-A"], mode: "DENY"` |
+| `KEYWORD` | 线路关键词，在 reason/route_name/all 字段包含关键词则拦截 | `{ keywords: ["关键词数组"], field: "reason"` |
+
+### 权限矩阵
+
+| 操作 | admin | dispatcher / safety | teacher |
+|------|-------|---------------------|---------|
+| 创建/修改/删除/启用停用规则 | ✅ | ❌ | ❌ |
+| 查看规则列表/详情 | ✅ | ✅ | ✅ |
+| 查看全部命中明细（所有申请 | ✅ | ✅ | ❌（仅见自己被拦截原因） |
+| 查看本人申请被拦截原因（通过错误响应） | ✅ | ✅ | ✅（仅见本人申请） |
+| 导出规则（JSON/CSV） | ✅ | ✅ | ❌ |
+| 导入规则（JSON/CSV） | ✅ | ❌ | ❌ |
+
+### 风险规则 API
+
+#### 1. 创建规则
+
+`POST /api/risk-rules`（admin）
+
+```bash
+curl -s -X POST http://localhost:3000/api/risk-rules \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 5" \
+  -d '{
+    "rule_type": "BANNED_STOP",
+    "name": "禁停站点",
+    "description": "施工中禁止通行",
+    "rule_config": { "stops": ["人民广场站" }
+  }' | jq
+
+# 禁行时间段（22:00-06:00 UTC）
+curl -s -X POST http://localhost:3000/api/risk-rules \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 5" \
+  -d '{
+    "rule_type": "BANNED_TIME_WINDOW",
+    "name": "夜间禁行",
+    "rule_config": { "start_hour": 22, "start_minute": 0, "end_hour": 6, "end_minute": 0 }
+  }' | jq
+
+# 车辆黑名单
+curl -s -X POST http://localhost:3000/api/risk-rules \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 5" \
+  -d '{
+    "rule_type": "VEHICLE_RESTRICTION",
+    "name": "故障车辆禁用",
+    "rule_config": { "vehicles": ["BUS-001"], "mode": "DENY" }
+  }' | jq
+
+# 关键词
+curl -s -X POST http://localhost:3000/api/risk-rules \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 5" \
+  -d '{
+    "rule_type": "KEYWORD",
+    "name": "敏感词拦截",
+    "rule_config": { "keywords": ["危险", "施工"], "field": "all" }
+  }' | jq
+```
+
+#### 2. 查询规则列表
+
+`GET /api/risk-rules?rule_type=&status=&page=1&page_size=20`
+
+```bash
+curl -s http://localhost:3000/api/risk-rules -H "X-User-Id: 3" | jq
+```
+
+响应中 `rule_config` 是解析后的对象，`hit_count` 显示命中次数，`last_hit_at` 最近命中时间。
+
+#### 3. 更新/启用停用/删除
+
+```bash
+# 更新
+curl -s -X PUT http://localhost:3000/api/risk-rules/1 \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 5" \
+  -d '{ "name": "新名称", "rule_config": { ... } }' | jq
+
+# 启用/停用
+curl -s -X POST http://localhost:3000/api/risk-rules/1/toggle \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 5" \
+  -d '{ "status": "INACTIVE" }' | jq
+
+# 删除
+curl -s -X DELETE http://localhost:3000/api/risk-rules/1 -H "X-User-Id: 5" | jq
+```
+
+#### 4. 查看命中记录
+
+```bash
+# 全部命中（admin/dispatcher/safety 可见全部；teacher 仅见本人相关）
+curl -s http://localhost:3000/api/risk-rules/hits -H "X-User-Id: 3" | jq
+
+# 某条规则的命中明细
+curl -s http://localhost:3000/api/risk-rules/1/hits -H "X-User-Id: 5" | jq
+```
+
+#### 5. 导入导出规则
+
+```bash
+# JSON 导出
+curl -s "http://localhost:3000/api/risk-rules/export?format=json" -H "X-User-Id: 5" | jq
+
+# CSV 导出（含命中次数、状态）
+curl -s -o risk_rules.csv "http://localhost:3000/api/risk-rules/export?format=csv" -H "X-User-Id: 5"
+
+# JSON 导入
+curl -s -X POST http://localhost:3000/api/risk-rules/import \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 5" \
+  -d '{
+    "format": "json",
+    "data": [
+      { "rule_type": "BANNED_STOP", "name": "导入的规则", "rule_config": { "stops": ["某某站"] }
+    ]
+  }' | jq
+
+# CSV 导入（列：规则类型、规则名称、配置JSON、状态、描述）
+curl -s -X POST http://localhost:3000/api/risk-rules/import \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 5" \
+  -d '{
+    "format": "csv",
+    "data": "规则类型,规则名称,配置JSON,状态,描述\nBANNED_STOP,导入CSV规则,\"{\"\"stops\"\":[\"\"某某站\"\"]}\",ACTIVE,CSV导入"
+  }' | jq
+```
+
+#### 6. 提交/发布命中时的错误响应示例
+
+命中风险规则时返回：
+
+```json
+{
+  "success": false,
+  "code": "RISK_RULE_VIOLATION",
+  "message": "提交失败，命中 2 条风险规则",
+  "details": {
+    "stage": "SUBMIT",
+    "hits": [
+      {
+        "rule_id": 1,
+        "rule_name": "禁停站点",
+        "rule_type": "BANNED_STOP",
+        "stage": "SUBMIT",
+        "hit_stops": ["人民广场站"],
+        "message": "禁用站点命中: 人民广场站"
+      }
+    ]
+  },
+  "timestamp": "2026-06-07T08:00:00.000Z"
+}
+```
+
+所有规则变更、命中事件均写入 `audit_logs`：
+
+- `RISK_RULE_CREATED / RISK_RULE_UPDATED / RISK_RULE_DELETED / RISK_RULE_STATUS_CHANGED
+- `RISK_RULE_VIOLATED_SUBMIT / RISK_RULE_VIOLATED_CLONE / RISK_RULE_VIOLATED_PUBLISH
+- `RISK_RULE_EXPORT_RESULT / RISK_RULE_IMPORTED

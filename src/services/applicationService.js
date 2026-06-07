@@ -1,5 +1,7 @@
 const { getDb } = require('../db');
 const { AppError } = require('../utils/response');
+const riskRuleSvc = require('./riskRuleService');
+const { log: auditLog } = require('../middleware/audit');
 
 const STATUS = {
   PENDING_SUBMITTED: 'PENDING_SUBMITTED',
@@ -71,6 +73,31 @@ function createApplication(user, body) {
   }
   const db = getDb();
   const { route_name, original_stops, new_stops, effective_start, effective_end, vehicle_id, reason } = body;
+
+  const tempRow = {
+    id: null,
+    route_name: route_name.trim(),
+    original_stops: JSON.stringify(original_stops),
+    new_stops: JSON.stringify(new_stops),
+    effective_start: new Date(effective_start).toISOString(),
+    effective_end: new Date(effective_end).toISOString(),
+    vehicle_id: vehicle_id ? vehicle_id.trim() : null,
+    reason: reason.trim()
+  };
+  const riskResult = riskRuleSvc.validateApplication(tempRow, user, { stage: 'SUBMIT' });
+  if (riskResult.violated) {
+    auditLog('RISK_RULE_VIOLATED_SUBMIT', {
+      user,
+      resource: '/api/applications',
+      detail: { stage: 'SUBMIT', hits: riskResult.hits, applicant_id: user.id, route_name: tempRow.route_name }
+    });
+    throw new AppError(
+      `提交失败，命中 ${riskResult.hits.length} 条风险规则`,
+      'RISK_RULE_VIOLATION',
+      409,
+      { stage: 'SUBMIT', hits: riskResult.hits }
+    );
+  }
 
   const info = db.prepare(`
     INSERT INTO applications
@@ -192,6 +219,31 @@ function cloneApplication(applicationId, operator, { applicant_id } = {}) {
       throw new AppError(`指定的申请人 ${tid} 不存在`, 'VALIDATION_ERROR', 400);
     }
     targetApplicantId = tid;
+  }
+
+  const tempRow = {
+    id: null,
+    route_name: src.route_name,
+    original_stops: src.original_stops,
+    new_stops: src.new_stops,
+    effective_start: src.effective_start,
+    effective_end: src.effective_end,
+    vehicle_id: src.vehicle_id,
+    reason: src.reason
+  };
+  const riskResult = riskRuleSvc.validateApplication(tempRow, operator, { stage: 'CLONE_RESUBMIT' });
+  if (riskResult.violated) {
+    auditLog('RISK_RULE_VIOLATED_CLONE', {
+      user: operator,
+      resource: '/api/applications/' + src.id + '/clone',
+      detail: { stage: 'CLONE_RESUBMIT', source_application_id: src.id, hits: riskResult.hits }
+    });
+    throw new AppError(
+      `复制再提交失败，命中 ${riskResult.hits.length} 条风险规则`,
+      'RISK_RULE_VIOLATION',
+      409,
+      { stage: 'CLONE_RESUBMIT', source_application_id: src.id, hits: riskResult.hits }
+    );
   }
 
   const info = db.prepare(`
@@ -359,6 +411,23 @@ function publish(applicationId, operator) {
       { currentStatus: app.status, requiredStatus: STATUS.SAFETY_APPROVED }
     );
   }
+
+  const riskResult = riskRuleSvc.validateApplication(app, operator, { stage: 'PUBLISH' });
+  if (riskResult.violated) {
+    auditLog('RISK_RULE_VIOLATED_PUBLISH', {
+      user: operator,
+      resource: '/api/applications/' + applicationId + '/publish',
+      resourceId: applicationId,
+      detail: { stage: 'PUBLISH', application_id: applicationId, hits: riskResult.hits }
+    });
+    throw new AppError(
+      `发布失败，命中 ${riskResult.hits.length} 条风险规则`,
+      'RISK_RULE_VIOLATION',
+      409,
+      { stage: 'PUBLISH', application_id: applicationId, hits: riskResult.hits }
+    );
+  }
+
   const conflicts = detectConflicts(db, app);
   if (conflicts.length > 0) {
     for (const c of conflicts) {

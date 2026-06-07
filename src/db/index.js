@@ -86,6 +86,33 @@ function initDb() {
       FOREIGN KEY (application_id) REFERENCES applications(id)
     );
 
+    CREATE TABLE IF NOT EXISTS risk_rules (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_type TEXT NOT NULL CHECK(rule_type IN ('BANNED_STOP','BANNED_TIME_WINDOW','VEHICLE_RESTRICTION','KEYWORD')),
+      name TEXT NOT NULL,
+      description TEXT,
+      rule_config TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','INACTIVE')),
+      hit_count INTEGER NOT NULL DEFAULT 0,
+      last_hit_at TEXT,
+      created_by INTEGER NOT NULL,
+      created_at TEXT DEFAULT (datetime('now','localtime')),
+      updated_at TEXT DEFAULT (datetime('now','localtime')),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS risk_rule_hits (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      rule_id INTEGER NOT NULL,
+      application_id INTEGER,
+      hit_detail TEXT NOT NULL,
+      created_by INTEGER,
+      created_at TEXT DEFAULT (datetime('now','localtime')),
+      FOREIGN KEY (rule_id) REFERENCES risk_rules(id),
+      FOREIGN KEY (application_id) REFERENCES applications(id),
+      FOREIGN KEY (created_by) REFERENCES users(id)
+    );
+
     CREATE INDEX IF NOT EXISTS idx_conflicts_app ON conflicts(application_id);
     CREATE INDEX IF NOT EXISTS idx_applications_status ON applications(status);
     CREATE INDEX IF NOT EXISTS idx_applications_route ON applications(route_name);
@@ -93,6 +120,10 @@ function initDb() {
     CREATE INDEX IF NOT EXISTS idx_approval_logs_app ON approval_logs(application_id);
     CREATE INDEX IF NOT EXISTS idx_audit_logs_user ON audit_logs(user_id);
     CREATE INDEX IF NOT EXISTS idx_applications_source ON applications(source_application_id);
+    CREATE INDEX IF NOT EXISTS idx_risk_rules_status ON risk_rules(status);
+    CREATE INDEX IF NOT EXISTS idx_risk_rules_type ON risk_rules(rule_type);
+    CREATE INDEX IF NOT EXISTS idx_risk_rule_hits_rule ON risk_rule_hits(rule_id);
+    CREATE INDEX IF NOT EXISTS idx_risk_rule_hits_app ON risk_rule_hits(application_id);
   `);
 
   const migrationRow = d.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='conflicts'").get();
@@ -127,6 +158,55 @@ function initDb() {
   const sourceIdx = d.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_applications_source'").get();
   if (!sourceIdx) {
     d.exec(`CREATE INDEX IF NOT EXISTS idx_applications_source ON applications(source_application_id)`);
+  }
+
+  const riskRulesTable = d.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='risk_rules'").get();
+  if (!riskRulesTable) {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS risk_rules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        rule_type TEXT NOT NULL CHECK(rule_type IN ('BANNED_STOP','BANNED_TIME_WINDOW','VEHICLE_RESTRICTION','KEYWORD')),
+        name TEXT NOT NULL,
+        description TEXT,
+        rule_config TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE','INACTIVE')),
+        hit_count INTEGER NOT NULL DEFAULT 0,
+        last_hit_at TEXT,
+        created_by INTEGER NOT NULL,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        updated_at TEXT DEFAULT (datetime('now','localtime')),
+        FOREIGN KEY (created_by) REFERENCES users(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_risk_rules_status ON risk_rules(status);
+      CREATE INDEX IF NOT EXISTS idx_risk_rules_type ON risk_rules(rule_type);
+    `);
+  }
+
+  const riskRuleHitsTable = d.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='risk_rule_hits'").get();
+  if (!riskRuleHitsTable) {
+    d.exec(`
+      CREATE TABLE IF NOT EXISTS risk_rule_hits (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        rule_id INTEGER NOT NULL,
+        application_id INTEGER,
+        hit_detail TEXT NOT NULL,
+        created_by INTEGER,
+        created_at TEXT DEFAULT (datetime('now','localtime')),
+        FOREIGN KEY (rule_id) REFERENCES risk_rules(id),
+        FOREIGN KEY (application_id) REFERENCES applications(id),
+        FOREIGN KEY (created_by) REFERENCES users(id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_risk_rule_hits_rule ON risk_rule_hits(rule_id);
+      CREATE INDEX IF NOT EXISTS idx_risk_rule_hits_app ON risk_rule_hits(application_id);
+    `);
+  }
+
+  const riskCols = d.prepare("PRAGMA table_info(risk_rules)").all();
+  if (!riskCols.find(c => c.name === 'hit_count')) {
+    d.exec(`ALTER TABLE risk_rules ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0`);
+  }
+  if (!riskCols.find(c => c.name === 'last_hit_at')) {
+    d.exec(`ALTER TABLE risk_rules ADD COLUMN last_hit_at TEXT`);
   }
 
   return d;
