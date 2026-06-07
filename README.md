@@ -238,7 +238,141 @@ curl -s -X POST http://localhost:3000/api/applications/1/publish \
   -H "X-User-Id: 5" | jq
 ```
 
-### 7. 导出数据
+### 7. 取消申请
+
+`POST /api/applications/:id/cancel`
+
+**权限**：申请人本人（`applicant_id === operator.id`）或 `admin`。其他老师、调度员、安全员均无权取消他人申请。
+
+**请求体**：
+| 字段     | 类型     | 必填 | 说明                                                                 |
+|----------|----------|------|----------------------------------------------------------------------|
+| comment  | string   | 否   | 取消备注。缺省时申请人本人取消默认为 "申请人取消"，admin 代取消默认为 "管理员代取消" |
+
+**可取消状态**：
+| 当前状态              | 状态文案     | 是否可取消 |
+|-----------------------|--------------|------------|
+| `PENDING_SUBMITTED`   | 待调度复核   | ✅ 可取消  |
+| `DISPATCH_REVIEWED`   | 待安全审批   | ✅ 可取消  |
+| `SAFETY_APPROVED`     | 待发布       | ✅ 可取消  |
+| `PUBLISHED`           | 已发布       | ❌ 不可取消，返回 `INVALID_TRANSITION` |
+| `REJECTED`            | 已驳回       | ❌ 不可取消，返回 `INVALID_TRANSITION` |
+| `CANCELLED`           | 已取消       | ❌ 不可取消，返回 `INVALID_TRANSITION` |
+
+**取消效果**：
+1. 申请状态变更为 `CANCELLED`（已取消）
+2. 写入 `cancel_remark` 字段（列表、详情、导出均可见）
+3. `approval_logs` 新增一条 `action='CANCEL'` 记录（含操作人、from_status、to_status、comment）
+4. `audit_logs` 记录接口调用（由审计中间件自动完成）
+5. 详情页 `history[]` 中可看到 CANCEL 记录
+
+**curl 示例**：
+
+```bash
+# 申请人本人取消（带备注，假设 id=1 状态为 PENDING_SUBMITTED）
+curl -s -X POST http://localhost:3000/api/applications/1/cancel \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 1" \
+  -d '{"comment":"改线原因已消除，不需要改线了"}' | jq
+
+# 申请人本人取消（缺省备注 → "申请人取消"）
+curl -s -X POST http://localhost:3000/api/applications/1/cancel \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 1" | jq
+
+# admin 代取消（带备注）
+curl -s -X POST http://localhost:3000/api/applications/1/cancel \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 5" \
+  -d '{"comment":"接教育局通知，该路段施工取消"}' | jq
+
+# admin 代取消（缺省备注 → "管理员代取消"）
+curl -s -X POST http://localhost:3000/api/applications/1/cancel \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 5" | jq
+```
+
+**成功响应示例**（HTTP 200）：
+
+```json
+{
+  "success": true,
+  "code": "OK",
+  "message": "取消成功",
+  "data": {
+    "id": 1,
+    "route_name": "1号线",
+    "status": "CANCELLED",
+    "status_label": "已取消",
+    "cancel_remark": "改线原因已消除，不需要改线了",
+    "applicant": { "id": 1, "name": "张老师", "role": "teacher" },
+    "history": [
+      {
+        "action": "SUBMIT",
+        "operator": { "id": 1, "name": "张老师" },
+        "from_status": null,
+        "to_status": "PENDING_SUBMITTED",
+        "comment": "提交申请",
+        "created_at": "2026-06-07T08:00:00.000Z"
+      },
+      {
+        "action": "CANCEL",
+        "operator": { "id": 1, "name": "张老师" },
+        "from_status": "PENDING_SUBMITTED",
+        "to_status": "CANCELLED",
+        "comment": "改线原因已消除，不需要改线了",
+        "created_at": "2026-06-07T08:30:00.000Z"
+      }
+    ]
+  },
+  "timestamp": "2026-06-07T08:30:00.000Z"
+}
+```
+
+**失败响应示例**：
+
+E1. 越权取消（非申请人非 admin，HTTP 403）：
+```json
+{
+  "success": false,
+  "code": "PERMISSION_DENIED",
+  "message": "无权取消该申请，仅申请人本人或管理员可取消",
+  "details": {
+    "applicant_id": 1,
+    "operator_id": 2,
+    "operator_role": "teacher"
+  },
+  "timestamp": "2026-06-07T08:30:00.000Z"
+}
+```
+
+E2. 终态不可取消（HTTP 409）：
+```json
+{
+  "success": false,
+  "code": "INVALID_TRANSITION",
+  "message": "状态流转无效：PUBLISHED 无法流转到 CANCELLED",
+  "details": {
+    "from": "PUBLISHED",
+    "to": "CANCELLED",
+    "allowed": []
+  },
+  "timestamp": "2026-06-07T08:30:00.000Z"
+}
+```
+
+E3. 申请不存在（HTTP 404）：
+```json
+{
+  "success": false,
+  "code": "NOT_FOUND",
+  "message": "申请 99999 不存在",
+  "details": null,
+  "timestamp": "2026-06-07T08:30:00.000Z"
+}
+```
+
+### 8. 导出数据
 
 `GET /api/applications/export?format=json|csv&route_name=&start_date=&end_date=`
 
@@ -254,7 +388,7 @@ curl -s -o applications.csv "http://localhost:3000/api/applications/export?forma
   -H "X-User-Id: 1"
 ```
 
-### 8. 用户相关
+### 9. 用户相关
 
 ```bash
 # 当前登录用户
@@ -317,6 +451,56 @@ curl -s -X POST http://localhost:3000/api/applications/2/publish -H "X-User-Id: 
 ### D. 重复发布幂等
 
 对已发布的申请再次执行 publish，返回同一份数据，不报错，数据库无新写入。
+
+### E. 越权取消申请（非申请人非 admin）
+
+李老师（id=2）试图取消张老师（id=1）的申请：
+
+```bash
+# 先用张老师提交一个申请（记住返回的 id，假设为 1）
+curl -s -X POST http://localhost:3000/api/applications \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 1" \
+  -d '{
+    "route_name":"3号线",
+    "original_stops":["A","B","C"],
+    "new_stops":["A","D","C"],
+    "effective_start":"2026-08-01T07:00:00.000Z",
+    "effective_end":"2026-08-01T09:00:00.000Z",
+    "reason":"测试"
+  }'
+
+# 李老师尝试取消（id 用上面返回的值，例如 1）
+curl -s -X POST http://localhost:3000/api/applications/1/cancel \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 2" \
+  -d '{"comment":"恶意取消"}' | jq
+```
+
+返回 `PERMISSION_DENIED`（HTTP 403），申请状态不变，`history` 中不会出现 `CANCEL` 记录。
+
+### F. 终态不可取消
+
+已发布/已驳回/已取消的申请无法再取消：
+
+```bash
+# 已发布的申请（假设 id=1 已经走到 PUBLISHED），申请人本人也不能取消
+curl -s -X POST http://localhost:3000/api/applications/1/cancel \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 1" | jq
+```
+
+返回 `INVALID_TRANSITION`（HTTP 409），`details.from` 为当前终态（`PUBLISHED` / `REJECTED` / `CANCELLED`），`details.allowed` 为空数组。
+
+### G. 取消不存在的申请
+
+```bash
+curl -s -X POST http://localhost:3000/api/applications/99999/cancel \
+  -H "Content-Type: application/json" \
+  -H "X-User-Id: 1" | jq
+```
+
+返回 `NOT_FOUND`（HTTP 404）。
 
 ## 数据存储
 
