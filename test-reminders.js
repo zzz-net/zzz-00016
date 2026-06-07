@@ -133,10 +133,16 @@ async function advanceTo(appId, targetStatus) {
   }
 }
 
+function formatLocalDateTime(d) {
+  const pad = (n) => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
+    pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+
 function setApplicationUpdatedAt(appId, minutesAgo) {
   const Database = require('better-sqlite3');
   const db = new Database(DB_PATH);
-  const t = new Date(Date.now() - minutesAgo * 60000).toISOString().replace('T', ' ').replace('Z', '');
+  const t = formatLocalDateTime(new Date(Date.now() - minutesAgo * 60000));
   db.prepare('UPDATE applications SET updated_at = ? WHERE id = ?').run(t, appId);
   db.close();
 }
@@ -222,29 +228,122 @@ function getLatestAuditLog(action) {
     rSafety.body && rSafety.body.data && rSafety.body.data.filters && rSafety.body.data.filters.role_scope === 'safety: 待安全审批');
 
   // =====================================================
-  section('场景 3：角色权限 —— admin 能看到全部三种待处理状态');
+  section('场景 3：角色权限 —— admin 只看到 SAFETY_APPROVED（待发布），不应混入调度和安全阶段');
 
   const app3_safety = await createApplication(1, '-C');
   await advanceTo(app3_safety, 'SAFETY_APPROVED');
 
   const rAdmin = await request('GET', '/api/applications/reminders', null, { 'X-User-Id': '5' });
   assert('admin 查询返回 200', rAdmin.status === 200);
-  assert('admin items 含 3 条（三种待处理状态各一条）',
-    rAdmin.body && rAdmin.body.data && rAdmin.body.data.items.length === 3,
+  assert('admin items 含 1 条（仅 SAFETY_APPROVED，不应混入 PENDING_SUBMITTED / DISPATCH_REVIEWED）',
+    rAdmin.body && rAdmin.body.data && rAdmin.body.data.items.length === 1,
     '实际=' + (rAdmin.body && rAdmin.body.data ? rAdmin.body.data.items.length : 'N/A'));
   if (rAdmin.body && rAdmin.body.data) {
     const statuses = rAdmin.body.data.items.map(i => i.status).sort();
-    assert('admin 命中三种状态',
-      statuses.join(',') === 'DISPATCH_REVIEWED,PENDING_SUBMITTED,SAFETY_APPROVED',
+    assert('admin 只命中 SAFETY_APPROVED 状态',
+      statuses.join(',') === 'SAFETY_APPROVED',
       '实际=' + statuses.join(','));
-    const safetyApproved = rAdmin.body.data.items.find(i => i.status === 'SAFETY_APPROVED');
+    const noPendingSubmitted = !rAdmin.body.data.items.some(i => i.status === 'PENDING_SUBMITTED');
+    assert('admin 待办不混入待调度复核（PENDING_SUBMITTED）', noPendingSubmitted);
+    const noDispatchReviewed = !rAdmin.body.data.items.some(i => i.status === 'DISPATCH_REVIEWED');
+    assert('admin 待办不混入待安全审批（DISPATCH_REVIEWED）', noDispatchReviewed);
+    const safetyApproved = rAdmin.body.data.items[0];
     if (safetyApproved) {
+      assert('SAFETY_APPROVED 项 status_label = 待发布', safetyApproved.status_label === '待发布');
       assert('SAFETY_APPROVED 项 next_role = admin', safetyApproved.next_role === 'admin');
       assert('SAFETY_APPROVED 项 next_role_label = 发布', safetyApproved.next_role_label === '发布');
     }
   }
-  assert('admin filters.role_scope 正确',
-    rAdmin.body && rAdmin.body.data && rAdmin.body.data.filters && rAdmin.body.data.filters.role_scope === 'admin: 全部待处理');
+  assert('admin filters.role_scope = admin: 待发布',
+    rAdmin.body && rAdmin.body.data && rAdmin.body.data.filters && rAdmin.body.data.filters.role_scope === 'admin: 待发布');
+
+  // =====================================================
+  section('场景 3b：admin 筛选条件 —— route_name 只匹配 SAFETY_APPROVED 范围内的记录');
+
+  const rAdminRoute = await request(
+    'GET', '/api/applications/reminders?route_name=提醒测试线-C',
+    null, { 'X-User-Id': '5' }
+  );
+  assert('admin 按线路筛选（SAFETY_APPROVED 的线-C）返回 200', rAdminRoute.status === 200);
+  assert('admin 按线路筛选命中 1 条（线-C 是 SAFETY_APPROVED）',
+    rAdminRoute.body && rAdminRoute.body.data && rAdminRoute.body.data.items.length === 1,
+    '实际=' + (rAdminRoute.body && rAdminRoute.body.data ? rAdminRoute.body.data.items.length : 'N/A'));
+  if (rAdminRoute.body && rAdminRoute.body.data && rAdminRoute.body.data.items[0]) {
+    assert('命中项是 SAFETY_APPROVED', rAdminRoute.body.data.items[0].status === 'SAFETY_APPROVED');
+    assert('命中项线路名称正确', rAdminRoute.body.data.items[0].route_name.indexOf('提醒测试线-C') !== -1);
+    assert('filters 记录 route_name',
+      rAdminRoute.body.data.filters && rAdminRoute.body.data.filters.route_name === '提醒测试线-C');
+  }
+
+  const rAdminRouteMiss = await request(
+    'GET', '/api/applications/reminders?route_name=提醒测试线-A',
+    null, { 'X-User-Id': '5' }
+  );
+  assert('admin 搜线-A（PENDING_SUBMITTED，非 admin 范围）返回 200', rAdminRouteMiss.status === 200);
+  assert('admin 搜线-A 返回 0 条（不在待发布范围内，即便数据库有该申请）',
+    rAdminRouteMiss.body && rAdminRouteMiss.body.data && rAdminRouteMiss.body.data.items.length === 0,
+    '实际=' + (rAdminRouteMiss.body && rAdminRouteMiss.body.data ? rAdminRouteMiss.body.data.items.length : 'N/A'));
+
+  // =====================================================
+  section('场景 3c：admin 筛选条件 —— status 精确匹配 + 空结果');
+
+  const rAdminStatusOk = await request(
+    'GET', '/api/applications/reminders?status=SAFETY_APPROVED',
+    null, { 'X-User-Id': '5' }
+  );
+  assert('admin 按 status=SAFETY_APPROVED 筛选返回 200', rAdminStatusOk.status === 200);
+  assert('admin 按 SAFETY_APPROVED 筛选命中 1 条',
+    rAdminStatusOk.body && rAdminStatusOk.body.data && rAdminStatusOk.body.data.items.length === 1,
+    '实际=' + (rAdminStatusOk.body && rAdminStatusOk.body.data ? rAdminStatusOk.body.data.items.length : 'N/A'));
+  if (rAdminStatusOk.body && rAdminStatusOk.body.data) {
+    const allMatch = rAdminStatusOk.body.data.items.every(i => i.status === 'SAFETY_APPROVED');
+    assert('所有命中项 status = SAFETY_APPROVED', allMatch);
+    assert('filters 记录 status=SAFETY_APPROVED',
+      rAdminStatusOk.body.data.filters && rAdminStatusOk.body.data.filters.status === 'SAFETY_APPROVED');
+  }
+
+  const rAdminStatusEmpty = await request(
+    'GET', '/api/applications/reminders?status=PENDING_SUBMITTED',
+    null, { 'X-User-Id': '5' }
+  );
+  assert('admin 按 status=PENDING_SUBMITTED（超出 admin 范围）返回 200', rAdminStatusEmpty.status === 200);
+  assert('admin 超出范围的 status 返回空结果（空数组）',
+    rAdminStatusEmpty.body && rAdminStatusEmpty.body.data &&
+    Array.isArray(rAdminStatusEmpty.body.data.items) && rAdminStatusEmpty.body.data.items.length === 0);
+  assert('admin 空结果 total = 0',
+    rAdminStatusEmpty.body && rAdminStatusEmpty.body.data && rAdminStatusEmpty.body.data.total === 0);
+  assert('admin 空结果 overdue_count = 0',
+    rAdminStatusEmpty.body && rAdminStatusEmpty.body.data && rAdminStatusEmpty.body.data.overdue_count === 0);
+  assert('admin 空结果 warning_count = 0',
+    rAdminStatusEmpty.body && rAdminStatusEmpty.body.data && rAdminStatusEmpty.body.data.warning_count === 0);
+  assert('admin 空结果 filters.role_scope 仍为 admin: 待发布',
+    rAdminStatusEmpty.body && rAdminStatusEmpty.body.data && rAdminStatusEmpty.body.data.filters &&
+    rAdminStatusEmpty.body.data.filters.role_scope === 'admin: 待发布');
+
+  // =====================================================
+  section('场景 3d：admin 审计日志 —— hit_count 与 role_scope 正确落盘');
+
+  const auditAdminBefore = countAuditLogsByAction('APPLICATION_REMINDERS_QUERY');
+  const rAdminForAudit = await request('GET', '/api/applications/reminders', null, { 'X-User-Id': '5' });
+  const auditAdminAfter = countAuditLogsByAction('APPLICATION_REMINDERS_QUERY');
+  assert('admin 查询后审计日志增加 1 条',
+    auditAdminAfter === auditAdminBefore + 1,
+    'before=' + auditAdminBefore + ', after=' + auditAdminAfter);
+
+  const latestAdminAudit = getLatestAuditLog('APPLICATION_REMINDERS_QUERY');
+  assert('admin 审计日志存在', !!latestAdminAudit);
+  if (latestAdminAudit && latestAdminAudit.detail) {
+    assert('admin 审计 detail.operator_id=5', latestAdminAudit.detail.operator_id === 5);
+    assert('admin 审计 detail.operator_role=admin', latestAdminAudit.detail.operator_role === 'admin');
+    assert('admin 审计 detail.hit_count 与返回 total 一致',
+      latestAdminAudit.detail.hit_count === (rAdminForAudit.body && rAdminForAudit.body.data ? rAdminForAudit.body.data.total : -1),
+      'audit_hit=' + latestAdminAudit.detail.hit_count +
+      ', response_total=' + (rAdminForAudit.body && rAdminForAudit.body.data ? rAdminForAudit.body.data.total : 'N/A'));
+    assert('admin 审计 detail.filters 存在', typeof latestAdminAudit.detail.filters === 'object');
+    assert('admin 审计 detail.timeout_minutes=60', latestAdminAudit.detail.timeout_minutes === 60);
+    assert('admin 审计 detail.overdue_count 为数字', typeof latestAdminAudit.detail.overdue_count === 'number');
+    assert('admin 审计 detail.warning_count 为数字', typeof latestAdminAudit.detail.warning_count === 'number');
+  }
 
   // =====================================================
   section('场景 4：角色权限 —— 普通老师只能看到本人未结束的申请');
@@ -271,58 +370,66 @@ function getLatestAuditLog(action) {
   }
 
   // =====================================================
-  section('场景 5：筛选 —— timeout_status=overdue 只返回已超时');
+  section('场景 5：筛选 —— timeout_status=overdue 只返回已超时（用调度员角色，其范围含 PENDING_SUBMITTED）');
 
   setApplicationUpdatedAt(app1_pending, 120);
   setApplicationUpdatedAt(app2_pending, 10);
+  setApplicationUpdatedAt(app3_safety, 10);
 
-  const rOverdue = await request('GET', '/api/applications/reminders?timeout_status=overdue', null, { 'X-User-Id': '5' });
-  assert('admin 查 overdue 返回 200', rOverdue.status === 200);
+  const rOverdue = await request('GET', '/api/applications/reminders?timeout_status=overdue', null, { 'X-User-Id': '3' });
+  assert('调度员查 overdue 返回 200', rOverdue.status === 200);
   if (rOverdue.body && rOverdue.body.data) {
     const allOverdue = rOverdue.body.data.items.every(i => i.is_overdue === true);
     assert('overdue 筛选后所有项 is_overdue=true', allOverdue);
     assert('overdue 筛选后 overdue_count = total', rOverdue.body.data.overdue_count === rOverdue.body.data.total);
-    assert('overdue 筛选命中至少 1 条', rOverdue.body.data.total >= 1, '实际=' + rOverdue.body.data.total);
+    assert('overdue 筛选命中 1 条（120 分钟前更新的 PENDING_SUBMITTED）',
+      rOverdue.body.data.total === 1, '实际=' + rOverdue.body.data.total);
     rOverdue.body.data.items.forEach(i => {
       assert('overdue 项 minutes_to_timeout <= 0', i.minutes_to_timeout <= 0, 'id=' + i.id + ', val=' + i.minutes_to_timeout);
+      assert('overdue 项状态为 PENDING_SUBMITTED（调度员范围）', i.status === 'PENDING_SUBMITTED');
     });
   }
 
   // =====================================================
-  section('场景 6：筛选 —— timeout_status=pending 只返回即将超时（未超时）');
+  section('场景 6：筛选 —— timeout_status=pending 只返回即将超时（未超时，用安全员角色）');
 
-  const rPending = await request('GET', '/api/applications/reminders?timeout_status=pending', null, { 'X-User-Id': '5' });
-  assert('admin 查 pending 返回 200', rPending.status === 200);
+  const rPending = await request('GET', '/api/applications/reminders?timeout_status=pending', null, { 'X-User-Id': '4' });
+  assert('安全员查 pending 返回 200', rPending.status === 200);
   if (rPending.body && rPending.body.data) {
     const noneOverdue = rPending.body.data.items.every(i => i.is_overdue === false);
     assert('pending 筛选后所有项 is_overdue=false', noneOverdue);
     assert('pending 筛选后 warning_count = total', rPending.body.data.warning_count === rPending.body.data.total);
+    assert('pending 筛选命中 1 条（10 分钟前更新的 DISPATCH_REVIEWED）',
+      rPending.body.data.total === 1, '实际=' + rPending.body.data.total);
     rPending.body.data.items.forEach(i => {
       assert('pending 项 minutes_to_timeout > 0', i.minutes_to_timeout > 0, 'id=' + i.id + ', val=' + i.minutes_to_timeout);
+      assert('pending 项状态为 DISPATCH_REVIEWED（安全员范围）', i.status === 'DISPATCH_REVIEWED');
     });
   }
 
   // =====================================================
-  section('场景 7：筛选 —— route_name 模糊匹配');
+  section('场景 7：筛选 —— route_name 模糊匹配（用调度员角色，其范围含线-A）');
 
-  const rRoute = await request('GET', '/api/applications/reminders?route_name=提醒测试线-A', null, { 'X-User-Id': '5' });
-  assert('按线路筛选返回 200', rRoute.status === 200);
+  const rRoute = await request('GET', '/api/applications/reminders?route_name=提醒测试线-A', null, { 'X-User-Id': '3' });
+  assert('调度员按线路筛选返回 200', rRoute.status === 200);
   assert('按线路筛选命中 1 条',
     rRoute.body && rRoute.body.data && rRoute.body.data.items.length === 1,
     '实际=' + (rRoute.body && rRoute.body.data ? rRoute.body.data.items.length : 'N/A'));
   if (rRoute.body && rRoute.body.data && rRoute.body.data.items[0]) {
     assert('命中项线路名称正确', rRoute.body.data.items[0].route_name.indexOf('提醒测试线-A') !== -1);
+    assert('命中项状态为 PENDING_SUBMITTED（调度员范围）', rRoute.body.data.items[0].status === 'PENDING_SUBMITTED');
     assert('filters 记录 route_name', rRoute.body.data.filters && rRoute.body.data.filters.route_name === '提醒测试线-A');
   }
 
   // =====================================================
-  section('场景 8：筛选 —— status 精确匹配');
+  section('场景 8：筛选 —— status 精确匹配（用调度员角色，其范围含 PENDING_SUBMITTED）');
 
-  const rStatus = await request('GET', '/api/applications/reminders?status=PENDING_SUBMITTED', null, { 'X-User-Id': '5' });
-  assert('按状态筛选返回 200', rStatus.status === 200);
+  const rStatus = await request('GET', '/api/applications/reminders?status=PENDING_SUBMITTED', null, { 'X-User-Id': '3' });
+  assert('调度员按状态筛选返回 200', rStatus.status === 200);
   if (rStatus.body && rStatus.body.data) {
     const allMatch = rStatus.body.data.items.every(i => i.status === 'PENDING_SUBMITTED');
     assert('状态筛选后所有项 status = PENDING_SUBMITTED', allMatch, '状态=' + rStatus.body.data.items.map(i => i.status).join(','));
+    assert('命中至少 1 条', rStatus.body.data.total >= 1);
     assert('filters 记录 status', rStatus.body.data.filters && rStatus.body.data.filters.status === 'PENDING_SUBMITTED');
   }
 

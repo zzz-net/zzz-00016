@@ -373,7 +373,81 @@ E3. 申请不存在（HTTP 404）：
 }
 ```
 
-### 8. 导出数据
+### 8. 待处理提醒
+
+`GET /api/applications/reminders?timeout_status=all|pending|overdue&route_name=&status=`
+
+**超时阈值配置**：通过环境变量 `APPROVAL_TIMEOUT_MINUTES` 设置，缺省为 60 分钟。阈值为整数且大于 0，非法值回退到缺省值。服务重启后从环境变量重新读取，持久化数据不受影响。
+
+**权限规则（每个角色只看自己该处理的环节）**：
+
+| 角色         | 查询范围                                                                 |
+|--------------|--------------------------------------------------------------------------|
+| `dispatcher` | 所有 `PENDING_SUBMITTED`（待调度复核）的申请                             |
+| `safety`     | 所有 `DISPATCH_REVIEWED`（待安全审批）的申请                             |
+| `admin`      | 所有 `SAFETY_APPROVED`（待发布）的申请（已过安全审批，下一步由 admin 发布）|
+| `teacher`    | 本人提交且尚未结束（`PENDING_SUBMITTED` / `DISPATCH_REVIEWED` / `SAFETY_APPROVED`）的申请，不可见他人 |
+
+**筛选参数**：
+
+| 参数             | 类型   | 说明                                                                        |
+|------------------|--------|-----------------------------------------------------------------------------|
+| `timeout_status` | string | `all`（默认，全部）/ `pending`（即将超时，未超时但在阈值内）/ `overdue`（已超时） |
+| `route_name`     | string | 按线路名称模糊匹配                                                          |
+| `status`         | string | 按申请状态精确匹配（如 `SAFETY_APPROVED`）                                  |
+
+**返回字段说明（`data.items[]` 每条）**：
+
+| 字段                 | 类型    | 说明                                                              |
+|----------------------|---------|-------------------------------------------------------------------|
+| `id`                 | integer | 申请 ID                                                           |
+| `route_name`         | string  | 线路名称                                                          |
+| `effective_start`    | string  | 生效开始 ISO 时间                                                 |
+| `effective_end`      | string  | 生效结束 ISO 时间                                                 |
+| `vehicle_id`         | string  | 车辆标识                                                          |
+| `reason`             | string  | 改线原因                                                          |
+| `status`             | string  | 当前状态码                                                        |
+| `status_label`       | string  | 当前状态文案（如"待发布"）                                        |
+| `applicant_id`       | integer | 申请人 ID                                                         |
+| `next_role`          | string  | 下一处理角色：`dispatcher` / `safety` / `admin`                   |
+| `next_role_label`    | string  | 下一处理角色文案：`调度复核` / `安全审批` / `发布`                |
+| `last_updated_at`    | string  | 进入当前状态的时间戳（用于超时计算的基准）                        |
+| `minutes_to_timeout` | number  | 距离超时的分钟数（负值表示已超时，保留 2 位小数）                 |
+| `is_overdue`         | boolean | 是否已超时                                                        |
+| `is_warning`         | boolean | 是否即将超时（未超时但已在阈值范围内）                            |
+
+**返回统计字段（`data` 顶层）**：
+- `timeout_minutes`：本次查询使用的超时阈值（分钟）
+- `total`：命中总条数
+- `overdue_count`：已超时条数
+- `warning_count`：即将超时条数
+- `filters`：实际生效的筛选条件（含角色范围、阈值、用户传入的筛选参数）
+
+**审计日志**：每次查询写入 `audit_logs`，`action=APPLICATION_REMINDERS_QUERY`，`detail` 包含操作者 ID/角色、筛选条件、命中数量、阈值、超时统计。
+
+**curl 示例**：
+
+```bash
+# 调度员查询所有待调度复核（含即将超时和已超时）
+curl -s http://localhost:3000/api/applications/reminders -H "X-User-Id: 3" | jq
+
+# 安全员只看已超时的
+curl -s "http://localhost:3000/api/applications/reminders?timeout_status=overdue" -H "X-User-Id: 4" | jq
+
+# admin 查看待发布（SAFETY_APPROVED），按线路筛选
+curl -s "http://localhost:3000/api/applications/reminders?route_name=1号线" \
+  -H "X-User-Id: 5" | jq
+
+# 普通老师查看自己未结束的申请提醒
+curl -s http://localhost:3000/api/applications/reminders -H "X-User-Id: 1" | jq
+
+# 使用自定义超时阈值启动服务（Windows PowerShell）
+# $env:APPROVAL_TIMEOUT_MINUTES=30; npm start
+# 使用自定义超时阈值启动服务（Linux/macOS）
+# APPROVAL_TIMEOUT_MINUTES=30 npm start
+```
+
+### 9. 导出数据
 
 `GET /api/applications/export?format=json|csv&status=&route_name=&start_date=&end_date=&applicant_id=&has_cancel_remark=`
 
@@ -420,7 +494,7 @@ curl -s -o applications.csv "http://localhost:3000/api/applications/export?forma
   -H "X-User-Id: 5"
 ```
 
-### 9. 用户相关
+### 10. 用户相关
 
 ```bash
 # 当前登录用户

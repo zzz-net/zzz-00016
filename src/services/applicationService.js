@@ -564,9 +564,9 @@ function getReminders(user, { timeout_status, route_name, status } = {}) {
       params.push('DISPATCH_REVIEWED');
       appliedFilters.role_scope = 'safety: 待安全审批';
     } else if (user.role === 'admin') {
-      conditions.push('status IN (?, ?, ?)');
-      params.push('PENDING_SUBMITTED', 'DISPATCH_REVIEWED', 'SAFETY_APPROVED');
-      appliedFilters.role_scope = 'admin: 全部待处理';
+      conditions.push('status = ?');
+      params.push('SAFETY_APPROVED');
+      appliedFilters.role_scope = 'admin: 待发布';
     }
   } else {
     conditions.push('applicant_id = ?');
